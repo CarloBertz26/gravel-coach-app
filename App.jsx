@@ -288,6 +288,9 @@ export default function App() {
   const [addRideForm, setAddRideForm] = useState({ name:"", km:"", elev:"", duration:"", notes:"" });
   const [manualRides, setManualRides] = useState([]);
   const [selectedCalDay, setSelectedCalDay] = useState(null);
+  // Tranche 5 — Engagement
+  const [showNutrition, setShowNutrition] = useState(false);
+  const [nutritionRideKm, setNutritionRideKm] = useState(50);
   const fileRef = useRef();
   const chatEndRef = useRef();
 
@@ -505,6 +508,72 @@ export default function App() {
 
   // Periodization chart
   const periodData = plan?.periodization?.map(w => ({ week:`S${w.week}`, tss:w.tssTarget, focus:w.focus })) || [];
+
+  // ── TRANCHE 5 COMPUTED ────────────────────────────────────────────────────
+  // Settimana corrente vs precedente
+  const now7 = Date.now() - 7*86400000;
+  const now14 = Date.now() - 14*86400000;
+  const thisWeekActs = activities.filter(a => new Date(a.start_date).getTime() > now7);
+  const lastWeekActs = activities.filter(a => { const t = new Date(a.start_date).getTime(); return t > now14 && t <= now7; });
+  const thisWeekKm = parseFloat((thisWeekActs.reduce((s,a)=>s+a.distance,0)/1000).toFixed(1));
+  const lastWeekKm = parseFloat((lastWeekActs.reduce((s,a)=>s+a.distance,0)/1000).toFixed(1));
+  const thisWeekElev = Math.round(thisWeekActs.reduce((s,a)=>s+a.total_elevation_gain,0));
+  const lastWeekElev = Math.round(lastWeekActs.reduce((s,a)=>s+a.total_elevation_gain,0));
+  const thisWeekTSS = thisWeekActs.reduce((s,a)=>s+calcTSS(a.moving_time,a.average_watts,ftp),0);
+  const lastWeekTSS = lastWeekActs.reduce((s,a)=>s+calcTSS(a.moving_time,a.average_watts,ftp),0);
+
+  // Streak settimane consecutive con almeno 1 uscita
+  const streakWeeks = (() => {
+    let streak = 0;
+    for (let w = 0; w < 52; w++) {
+      const start = Date.now() - (w+1)*7*86400000;
+      const end = Date.now() - w*7*86400000;
+      const hasRide = activities.some(a => { const t = new Date(a.start_date).getTime(); return t >= start && t < end; });
+      if (hasRide) streak++;
+      else break;
+    }
+    return streak;
+  })();
+
+  // Challenge settimanali automatiche basate su statistiche
+  const weeklyChallenge = (() => {
+    const challenges = [];
+    // Challenge km
+    if (lastWeekKm > 0) {
+      const target = Math.round(lastWeekKm * 1.1);
+      const pct = Math.min(100, Math.round((thisWeekKm / target) * 100));
+      challenges.push({ icon:"🚴", label:"Volume settimanale", current:`${thisWeekKm}km`, target:`${target}km`, pct, color:"#FC4C02" });
+    } else {
+      challenges.push({ icon:"🚴", label:"Prima uscita questa settimana", current:`${thisWeekKm}km`, target:"1 uscita", pct: thisWeekActs.length > 0 ? 100 : 0, color:"#FC4C02" });
+    }
+    // Challenge dislivello
+    if (lastWeekElev > 0) {
+      const target = Math.round(lastWeekElev * 1.1);
+      const pct = Math.min(100, Math.round((thisWeekElev / target) * 100));
+      challenges.push({ icon:"⛰️", label:"Dislivello settimanale", current:`${thisWeekElev}m`, target:`${target}m`, pct, color:"#0ea5e9" });
+    }
+    // Challenge TSS
+    const tssTarget = plan?.weeklyTSSTarget || Math.round(lastWeekTSS * 1.05) || 200;
+    const tssPct = Math.min(100, Math.round((thisWeekTSS / tssTarget) * 100));
+    challenges.push({ icon:"⚡", label:"Carico settimanale (TSS)", current:`${thisWeekTSS}`, target:`${tssTarget}`, pct:tssPct, color:"#a855f7" });
+    return challenges;
+  })();
+
+  // Sessione di oggi dal piano AI
+  const todaySession = (() => {
+    if (!plan?.weeklyPlan || plan._error) return null;
+    const days = ["Domenica","Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato"];
+    const todayName = days[new Date().getDay()];
+    return plan.weeklyPlan.find(s => s.day === todayName) || null;
+  })();
+
+  // Calcolo calorie uscita per nutrition tracker
+  const calcCalories = (km, elevGain=0) => {
+    const base = km * 30; // ~30 kcal/km base
+    const elevBonus = elevGain * 0.1;
+    return Math.round(base + elevBonus);
+  };
+  const nutritionCalories = calcCalories(nutritionRideKm);
 
   // ── ONBOARDING ────────────────────────────────────────────────────────────
   if (screen === "onboarding") {
@@ -881,6 +950,102 @@ export default function App() {
                 <StatCard icon="hill" label="dislivello" value={(totalElev/1000).toFixed(1)} unit="km↑" color="#0ea5e9" sub="totale" />
                 <StatCard icon="zap" label="FTP stimato" value={ftp} unit="W" color="#f59e0b" sub={`${w2wkg(ftp,weight)} W/kg`} />
                 <StatCard icon="heart" label="TSS settimana" value={weeklyTSS} unit="" color="#a855f7" sub="carico stimato" />
+              </div>
+
+              {/* ── SESSIONE DI OGGI ── */}
+              {todaySession && (
+                <div className="card" style={{ padding:18, marginBottom:16, border:`1px solid ${ta(todaySession.type)}33`, background:`${tc(todaySession.type)}` }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                      <span style={{ fontSize:18 }}>📅</span>
+                      <div>
+                        <div style={{ fontSize:10, color:ta(todaySession.type), fontWeight:700, textTransform:"uppercase", letterSpacing:".07em" }}>Oggi — {todaySession.type}</div>
+                        <div className="cond" style={{ fontSize:22, color:"#fff" }}>{todaySession.title}</div>
+                      </div>
+                    </div>
+                    <span className="pill" style={{ background:`${ta(todaySession.type)}18`, color:ta(todaySession.type), border:`1px solid ${ta(todaySession.type)}33` }}>{todaySession.intensity}</span>
+                  </div>
+                  <div style={{ display:"flex", gap:16, marginBottom:10, flexWrap:"wrap" }}>
+                    {[[todaySession.duration,"🕐"],[todaySession.distance,"📍"],[todaySession.elevation,"⛰️"],[todaySession.zones,"⚡"]].map(([v,ic]) => v && v !== "—" && (
+                      <span key={ic} style={{ fontSize:12, color:"#94a3b8", fontFamily:"'JetBrains Mono',monospace" }}>{ic} {v}</span>
+                    ))}
+                  </div>
+                  <p style={{ fontSize:12, color:"#94a3b8", lineHeight:1.6, marginBottom:10 }}>{todaySession.description}</p>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={()=>setTab("plan")} style={{ background:`${ta(todaySession.type)}18`, border:`1px solid ${ta(todaySession.type)}33`, borderRadius:8, padding:"7px 14px", color:ta(todaySession.type), fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                      Dettaglio completo →
+                    </button>
+                    {todaySession.tss > 0 && <span style={{ display:"flex", alignItems:"center", fontSize:12, color:"#a855f7", fontFamily:"'JetBrains Mono',monospace" }}>TSS ~{todaySession.tss}</span>}
+                  </div>
+                </div>
+              )}
+
+              {/* ── CHALLENGE SETTIMANALI ── */}
+              <div className="card" style={{ padding:18, marginBottom:16 }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:16 }}>🎯</span>
+                    <span style={{ fontSize:12, fontWeight:600, color:"#fff" }}>Challenge Settimana</span>
+                  </div>
+                  {streakWeeks > 0 && (
+                    <div style={{ display:"flex", alignItems:"center", gap:5, background:"rgba(245,158,11,.1)", border:"1px solid rgba(245,158,11,.2)", borderRadius:20, padding:"3px 10px" }}>
+                      <span style={{ fontSize:12 }}>🔥</span>
+                      <span style={{ fontSize:11, color:"#f59e0b", fontWeight:600 }}>{streakWeeks} {streakWeeks === 1 ? "settimana" : "settimane"} di fila</span>
+                    </div>
+                  )}
+                </div>
+                <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                  {weeklyChallenge.map((c, i) => (
+                    <div key={i}>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+                        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                          <span style={{ fontSize:14 }}>{c.icon}</span>
+                          <span style={{ fontSize:12, color:"#e2e8f0" }}>{c.label}</span>
+                        </div>
+                        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                          <span className="mono" style={{ fontSize:11, color:"#6b7280" }}>{c.current}</span>
+                          <span style={{ color:"#374151", fontSize:11 }}>/ {c.target}</span>
+                          <span className="mono" style={{ fontSize:11, color:c.pct >= 100 ? "#22c55e" : c.color, fontWeight:600 }}>{c.pct}%</span>
+                        </div>
+                      </div>
+                      <div style={{ height:5, background:"#1a2535", borderRadius:3, overflow:"hidden" }}>
+                        <div style={{ height:"100%", background: c.pct >= 100 ? "#22c55e" : c.color, borderRadius:3, width:`${c.pct}%`, transition:"width 1s ease" }} />
+                      </div>
+                      {c.pct >= 100 && <div style={{ fontSize:10, color:"#22c55e", marginTop:3 }}>✓ Challenge completata!</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── RIEPILOGO SETTIMANA ── */}
+              <div className="card" style={{ padding:18, marginBottom:16 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                  <span style={{ fontSize:16 }}>📈</span>
+                  <span style={{ fontSize:12, fontWeight:600, color:"#fff" }}>Questa settimana vs precedente</span>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                  {[
+                    { label:"Km", current:thisWeekKm, prev:lastWeekKm, unit:"km", color:"#FC4C02" },
+                    { label:"Dislivello", current:thisWeekElev, prev:lastWeekElev, unit:"m↑", color:"#0ea5e9" },
+                    { label:"TSS", current:thisWeekTSS, prev:lastWeekTSS, unit:"", color:"#a855f7" },
+                  ].map(({label, current, prev, unit, color}) => {
+                    const diff = prev > 0 ? Math.round(((current - prev) / prev) * 100) : null;
+                    const isUp = diff !== null && diff >= 0;
+                    return (
+                      <div key={label} style={{ background:"#0a1120", borderRadius:10, padding:"12px 10px", textAlign:"center" }}>
+                        <div style={{ fontSize:10, color:"#4b5563", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>{label}</div>
+                        <div className="cond" style={{ fontSize:24, color, lineHeight:1 }}>{current}<span style={{ fontSize:11, marginLeft:2 }}>{unit}</span></div>
+                        {diff !== null ? (
+                          <div style={{ fontSize:10, color:isUp?"#22c55e":"#ef4444", marginTop:4 }}>
+                            {isUp ? "▲" : "▼"} {Math.abs(diff)}% vs sett. prec.
+                          </div>
+                        ) : (
+                          <div style={{ fontSize:10, color:"#374151", marginTop:4 }}>prima settimana</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Charts row */}
@@ -1580,10 +1745,72 @@ export default function App() {
           {/* ── COACH CHAT TAB ── */}
           {tab === "coach" && (
             <div style={{ maxWidth:720, margin:"0 auto", padding:"20px 16px", display:"flex", flexDirection:"column", height:"calc(100vh - 130px)" }}>
-              <div style={{ fontWeight:600, color:"#fff", marginBottom:14, display:"flex", alignItems:"center", gap:8 }}>
-                <IC n="chat" s={16} /> Chat con il Coach AI
-                {!plan && <span className="pill" style={{ background:"rgba(245,158,11,.1)", color:"#f59e0b" }}>Imposta un obiettivo per analisi completa</span>}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <IC n="chat" s={16} />
+                  <span style={{ fontWeight:600, color:"#fff" }}>Coach AI</span>
+                  {!plan && <span className="pill" style={{ background:"rgba(245,158,11,.1)", color:"#f59e0b" }}>Imposta un obiettivo per analisi completa</span>}
+                </div>
+                <button onClick={()=>setShowNutrition(n=>!n)} style={{ background:showNutrition?"rgba(34,197,94,.15)":"rgba(255,255,255,.05)", border:`1px solid ${showNutrition?"rgba(34,197,94,.3)":"rgba(255,255,255,.1)"}`, borderRadius:8, padding:"6px 12px", color:showNutrition?"#22c55e":"#6b7280", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                  🥗 Nutrizione
+                </button>
               </div>
+
+              {/* NUTRITION TRACKER */}
+              {showNutrition && (
+                <div className="card" style={{ padding:20, marginBottom:16, border:"1px solid rgba(34,197,94,.2)" }}>
+                  <div style={{ fontWeight:600, color:"#22c55e", marginBottom:16, fontSize:14 }}>🥗 Nutrition Tracker</div>
+                  <div style={{ marginBottom:16 }}>
+                    <label style={{ fontSize:12, color:"#6b7280", display:"block", marginBottom:8 }}>Distanza dell'uscita pianificata</label>
+                    <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                      <input type="range" min={10} max={200} value={nutritionRideKm} onChange={e=>setNutritionRideKm(+e.target.value)} style={{ flex:1, accentColor:"#FC4C02", background:"transparent", border:"none", padding:0 }} />
+                      <span className="cond" style={{ fontSize:28, color:"#FC4C02", minWidth:60 }}>{nutritionRideKm}km</span>
+                    </div>
+                  </div>
+                  <div style={{ background:"rgba(34,197,94,.08)", border:"1px solid rgba(34,197,94,.15)", borderRadius:10, padding:"12px 16px", marginBottom:14, textAlign:"center" }}>
+                    <div style={{ fontSize:11, color:"#6b7280", marginBottom:4 }}>Calorie stimate bruciate</div>
+                    <div className="cond" style={{ fontSize:40, color:"#22c55e" }}>{nutritionCalories} <span style={{ fontSize:16 }}>kcal</span></div>
+                  </div>
+                  <div style={{ display:"grid", gap:8 }}>
+                    {[
+                      {
+                        fase:"🌅 Pre-uscita (1-2h prima)",
+                        color:"#f59e0b",
+                        items: nutritionRideKm < 40
+                          ? ["Banana o 2 biscotti secchi","Caffè o tè senza zucchero","150ml acqua"]
+                          : nutritionRideKm < 80
+                          ? ["Porridge con miele (60g avena)","Banana matura","200ml acqua + pizzico di sale"]
+                          : ["Pasta o riso con poco condimento (150g)","Banana + miele","300ml acqua con sali"]
+                      },
+                      {
+                        fase: nutritionRideKm < 60 ? "🚴 In sella (non necessario)" : "🚴 In sella (ogni 45-60min)",
+                        color:"#0ea5e9",
+                        items: nutritionRideKm < 60
+                          ? ["Acqua a sufficienza","Nessun cibo solido necessario"]
+                          : nutritionRideKm < 100
+                          ? ["1 gel energetico o barretta ogni ora","500ml acqua/ora con elettroliti","Dattero o banana se preferisci naturale"]
+                          : ["60-90g carboidrati/ora (gel + barrette)","750ml acqua/ora con sali minerali","Piccoli spuntini salati ogni 1.5h"]
+                      },
+                      {
+                        fase:"💪 Post-uscita (entro 30min)",
+                        color:"#a855f7",
+                        items: nutritionRideKm < 50
+                          ? ["Frutto fresco","Yogurt greco","Acqua a volontà"]
+                          : ["20-30g proteine (yogurt greco, uova, shake)","Carboidrati semplici (frutta, pane)","Acqua + bevanda con elettroliti"]
+                      },
+                    ].map(({fase, color, items}) => (
+                      <div key={fase} style={{ background:"#0a1120", borderRadius:9, padding:"12px 14px" }}>
+                        <div style={{ fontSize:11, fontWeight:700, color, marginBottom:6 }}>{fase}</div>
+                        {items.map((item,i) => (
+                          <div key={i} style={{ fontSize:12, color:"#94a3b8", marginBottom:3, display:"flex", alignItems:"flex-start", gap:6 }}>
+                            <span style={{ color, flexShrink:0 }}>·</span>{item}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* Messages */}
               <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:10, paddingBottom:12 }}>
                 {chatMessages.map((m,i) => (
