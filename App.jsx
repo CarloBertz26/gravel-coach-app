@@ -257,21 +257,21 @@ export default function App() {
   // Onboarding
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [ftpMode, setFtpMode] = useState("auto"); // auto | manual | ramp
-  const [ftpManual, setFtpManual] = useState("");
+  const [ftpManual, setFtpManual] = useState(() => localStorage.getItem("gc_ftpManual")||"");
   const [rampPhase, setRampPhase] = useState("idle"); // idle | warmup | test | result
   const [rampTimer, setRampTimer] = useState(0);
   const [rampInterval, setRampInterval] = useState(null);
-  const [bikeType, setBikeType] = useState("gravel"); // road | gravel | both
-  const [daysPerWeek, setDaysPerWeek] = useState(4);
+  const [bikeType, setBikeType] = useState(() => localStorage.getItem("gc_bikeType")||"gravel");
+  const [daysPerWeek, setDaysPerWeek] = useState(() => parseInt(localStorage.getItem("gc_daysPerWeek")||"4"));
   const [userName, setUserName] = useState("");
   const [plan, setPlan] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [weight, setWeight] = useState(70);
-  const [goalType, setGoalType] = useState("route");
-  const [goalText, setGoalText] = useState("");
-  const [goalDate, setGoalDate] = useState("");
+  const [weight, setWeight] = useState(() => parseInt(localStorage.getItem("gc_weight")||"70"));
+  const [goalType, setGoalType] = useState(() => localStorage.getItem("gc_goalType")||"route");
+  const [goalText, setGoalText] = useState(() => localStorage.getItem("gc_goalText")||"");
+  const [goalDate, setGoalDate] = useState(() => localStorage.getItem("gc_goalDate")||"");
   const [gpxFile, setGpxFile] = useState(null);
-  const [notes, setNotes] = useState({}); // {activityId: text}
+  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_notes")||"{}"); } catch { return {}; } });
   const [chatMessages, setChatMessages] = useState([
     { role:"assistant", content:"Ciao! Sono il tuo coach. Analizza le tue attività e imposta un obiettivo per iniziare. Poi posso rispondere a qualsiasi domanda sul tuo allenamento." }
   ]);
@@ -286,7 +286,7 @@ export default function App() {
   const [showAddRide, setShowAddRide] = useState(false);
   const [addRideDay, setAddRideDay] = useState(null);
   const [addRideForm, setAddRideForm] = useState({ name:"", km:"", elev:"", duration:"", notes:"" });
-  const [manualRides, setManualRides] = useState([]);
+  const [manualRides, setManualRides] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_manualRides")||"[]"); } catch { return []; } });
   const [selectedCalDay, setSelectedCalDay] = useState(null);
   // Tranche 5 — Engagement
   const [showNutrition, setShowNutrition] = useState(false);
@@ -309,8 +309,14 @@ export default function App() {
         .then((acts) => {
           const rides = acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
           setActivities(rides);
-          setOnboardingStep(0);
-          setScreen("onboarding");
+          // Salta onboarding se già completato in precedenza
+          const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
+          if (alreadyOnboarded) {
+            setScreen("main");
+          } else {
+            setOnboardingStep(0);
+            setScreen("onboarding");
+          }
           window.history.replaceState({}, "", window.location.pathname);
         })
         .catch((err) => {
@@ -323,14 +329,30 @@ export default function App() {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [chatMessages]);
 
+  // Salva profilo su localStorage ogni volta che cambia
+  useEffect(() => { localStorage.setItem("gc_weight", weight); }, [weight]);
+  useEffect(() => { localStorage.setItem("gc_bikeType", bikeType); }, [bikeType]);
+  useEffect(() => { localStorage.setItem("gc_daysPerWeek", daysPerWeek); }, [daysPerWeek]);
+  useEffect(() => { if (ftpManual) localStorage.setItem("gc_ftpManual", ftpManual); }, [ftpManual]);
+  useEffect(() => { localStorage.setItem("gc_goalType", goalType); }, [goalType]);
+  useEffect(() => { localStorage.setItem("gc_goalText", goalText); }, [goalText]);
+  useEffect(() => { localStorage.setItem("gc_goalDate", goalDate); }, [goalDate]);
+  useEffect(() => { localStorage.setItem("gc_notes", JSON.stringify(notes)); }, [notes]);
+  useEffect(() => { if (manualRides.length) localStorage.setItem("gc_manualRides", JSON.stringify(manualRides)); }, [manualRides]);
+
   const connectMock = () => {
     setScreen("loading");
     setTimeout(() => {
       setAthlete({ firstname:"Carlo", lastname:"R." });
       setToken("MOCK");
       setActivities(getMockActivities());
-      setOnboardingStep(0);
-      setScreen("onboarding");
+      const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
+      if (alreadyOnboarded) {
+        setScreen("main");
+      } else {
+        setOnboardingStep(0);
+        setScreen("onboarding");
+      }
     }, 2000);
   };
 
@@ -421,6 +443,7 @@ export default function App() {
   };
 
   const completeOnboarding = () => {
+    localStorage.setItem("gc_onboarded", "true");
     setScreen("main");
   };
 
@@ -913,7 +936,19 @@ export default function App() {
                 <span style={{ fontSize:11, color:"#22c55e", fontWeight:600 }}>Piano attivo</span>
               </div>
             )}
-            <div style={{ fontSize:12, color:"#4b5563" }}>{athlete?.firstname} {athlete?.lastname}</div>
+            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+              <div style={{ fontSize:12, color:"#4b5563" }}>{athlete?.firstname} {athlete?.lastname}</div>
+              <button onClick={() => {
+                if (window.confirm("Vuoi resettare il profilo e rifare l'onboarding?")) {
+                  localStorage.removeItem("gc_onboarded");
+                  localStorage.removeItem("gc_weight");
+                  localStorage.removeItem("gc_bikeType");
+                  localStorage.removeItem("gc_daysPerWeek");
+                  localStorage.removeItem("gc_ftpManual");
+                  setScreen("landing");
+                }
+              }} style={{ background:"transparent", border:"none", color:"#374151", fontSize:11, cursor:"pointer", fontFamily:"'Inter',sans-serif", padding:"2px 6px", borderRadius:4 }} title="Reset profilo">⚙️</button>
+            </div>
           </div>
         </header>
 
