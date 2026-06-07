@@ -315,6 +315,8 @@ export default function App() {
         const gd = localStorage.getItem("gc_goalDate"); if (gd) setGoalDate(gd);
         const n = localStorage.getItem("gc_notes"); if (n) setNotes(JSON.parse(n));
         const mr = localStorage.getItem("gc_manualRides"); if (mr) setManualRides(JSON.parse(mr));
+        const lr = localStorage.getItem("gc_lastRefresh");
+        if (lr) setLastRefresh(lr);
         setScreen("main");
         return;
       }
@@ -408,7 +410,9 @@ export default function App() {
         : acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
       setActivities(rides);
       localStorage.setItem("gc_activities", JSON.stringify(rides));
-      localStorage.setItem("gc_lastRefresh", new Date().toISOString());
+      const ts = new Date().toISOString();
+      localStorage.setItem("gc_lastRefresh", ts);
+      setLastRefresh(ts);
     } catch(e) {
       console.error("Errore aggiornamento attività:", e);
     }
@@ -1050,11 +1054,11 @@ export default function App() {
             <div style={{ maxWidth:960, margin:"0 auto", padding:"20px 16px" }}>
 
               {/* Ultima sincronizzazione */}
-              {localStorage.getItem("gc_lastRefresh") && (
+              {lastRefresh && (
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", gap:5, marginBottom:8 }}>
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                   <span style={{ fontSize:10, color:"#374151", fontFamily:"'JetBrains Mono',monospace" }}>
-                    Aggiornato: {new Date(localStorage.getItem("gc_lastRefresh")).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                    Aggiornato: {new Date(lastRefresh).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
                   </span>
                 </div>
               )}
