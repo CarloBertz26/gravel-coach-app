@@ -322,8 +322,8 @@ export default function App() {
       }
     } catch(e) {
       console.error("Errore caricamento sessione:", e);
-      // Se qualcosa va storto, pulisci e vai alla landing
       localStorage.clear();
+      setScreen("landing");
     }
   }, []);
 
@@ -338,15 +338,18 @@ export default function App() {
           setToken(access_token);
           setAthlete(a);
           // Salva per auto-login futuro
-          localStorage.setItem("gc_token", access_token);
-          localStorage.setItem("gc_athlete", JSON.stringify(a));
+          try {
+            localStorage.setItem("gc_token", access_token);
+            localStorage.setItem("gc_athlete", JSON.stringify(a));
+          } catch(e) { console.warn("localStorage:", e); }
           return fetchStravaActivities(access_token);
         })
         .then((acts) => {
           const rides = acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
           setActivities(rides);
           // Salva in localStorage per auto-login futuro
-          localStorage.setItem("gc_activities", JSON.stringify(rides));
+          // Salva max 20 attività per evitare overflow localStorage
+          try { localStorage.setItem("gc_activities", JSON.stringify(rides.slice(0, 20))); } catch(e) { console.warn("localStorage quota:", e); }
           // Salta onboarding se già completato in precedenza
           const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
           if (alreadyOnboarded) {
@@ -409,7 +412,7 @@ export default function App() {
         ? acts
         : acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
       setActivities(rides);
-      localStorage.setItem("gc_activities", JSON.stringify(rides));
+      localStorage.setItem("gc_activities", JSON.stringify(rides.slice(0, 20)));
       const ts = new Date().toISOString();
       localStorage.setItem("gc_lastRefresh", ts);
       setLastRefresh(ts);
