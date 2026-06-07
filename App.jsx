@@ -251,9 +251,9 @@ const StatCard = ({ icon, label, value, unit, color, sub }) => (
 export default function App() {
   const [screen, setScreen] = useState("landing"); // landing | loading | onboarding | main
   const [tab, setTab] = useState("dashboard");      // dashboard | plan | calendar | notes | coach
-  const [athlete, setAthlete] = useState(null);
-  const [token, setToken] = useState(null);
-  const [activities, setActivities] = useState([]);
+  const [athlete, setAthlete] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_athlete")||"null"); } catch { return null; } });
+  const [token, setToken] = useState(() => localStorage.getItem("gc_token")||null);
+  const [activities, setActivities] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_activities")||"[]"); } catch { return []; } });
   // Onboarding
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [ftpMode, setFtpMode] = useState("auto"); // auto | manual | ramp
@@ -294,6 +294,19 @@ export default function App() {
   const fileRef = useRef();
   const chatEndRef = useRef();
 
+  // Auto-login all'avvio se token e attività già salvati
+  useEffect(() => {
+    const savedToken = localStorage.getItem("gc_token");
+    const savedAthlete = localStorage.getItem("gc_athlete");
+    const savedActivities = localStorage.getItem("gc_activities");
+    const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
+    if (savedToken && savedAthlete && savedActivities && alreadyOnboarded) {
+      // Già loggato — vai direttamente in dashboard
+      setScreen("main");
+      return;
+    }
+  }, []);
+
   // Handle OAuth redirect
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -304,11 +317,16 @@ export default function App() {
         .then(({ access_token, athlete: a }) => {
           setToken(access_token);
           setAthlete(a);
+          // Salva per auto-login futuro
+          localStorage.setItem("gc_token", access_token);
+          localStorage.setItem("gc_athlete", JSON.stringify(a));
           return fetchStravaActivities(access_token);
         })
         .then((acts) => {
           const rides = acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
           setActivities(rides);
+          // Salva in localStorage per auto-login futuro
+          localStorage.setItem("gc_activities", JSON.stringify(rides));
           // Salta onboarding se già completato in precedenza
           const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
           if (alreadyOnboarded) {
@@ -343,9 +361,15 @@ export default function App() {
   const connectMock = () => {
     setScreen("loading");
     setTimeout(() => {
-      setAthlete({ firstname:"Carlo", lastname:"R." });
+      const a = { firstname:"Carlo", lastname:"R." };
+      const acts = getMockActivities();
+      setAthlete(a);
       setToken("MOCK");
-      setActivities(getMockActivities());
+      setActivities(acts);
+      // Salva per auto-login futuro
+      localStorage.setItem("gc_token", "MOCK");
+      localStorage.setItem("gc_athlete", JSON.stringify(a));
+      localStorage.setItem("gc_activities", JSON.stringify(acts));
       const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
       if (alreadyOnboarded) {
         setScreen("main");
@@ -936,18 +960,29 @@ export default function App() {
                 <span style={{ fontSize:11, color:"#22c55e", fontWeight:600 }}>Piano attivo</span>
               </div>
             )}
-            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
               <div style={{ fontSize:12, color:"#4b5563" }}>{athlete?.firstname} {athlete?.lastname}</div>
+              {/* Tasto aggiorna attività */}
+              <button onClick={refreshActivities} disabled={refreshing} title="Aggiorna attività Strava"
+                style={{ background:"transparent", border:"1px solid rgba(255,255,255,.1)", borderRadius:6, width:28, height:28, display:"flex", alignItems:"center", justifyContent:"center", color:refreshing?"#374151":"#6b7280", cursor:refreshing?"not-allowed":"pointer", transition:"all .2s" }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ animation:refreshing?"spin 1s linear infinite":"none" }}>
+                  <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+              </button>
+              {/* Tasto disconnetti */}
               <button onClick={() => {
-                if (window.confirm("Vuoi resettare il profilo e rifare l'onboarding?")) {
-                  localStorage.removeItem("gc_onboarded");
-                  localStorage.removeItem("gc_weight");
-                  localStorage.removeItem("gc_bikeType");
-                  localStorage.removeItem("gc_daysPerWeek");
-                  localStorage.removeItem("gc_ftpManual");
+                if (window.confirm("Vuoi disconnetterti e tornare alla schermata iniziale?")) {
+                  ["gc_onboarded","gc_token","gc_athlete","gc_activities",
+                   "gc_weight","gc_bikeType","gc_daysPerWeek","gc_ftpManual",
+                   "gc_goalText","gc_goalDate","gc_goalType","gc_lastRefresh"].forEach(k => localStorage.removeItem(k));
+                  setToken(null);
+                  setAthlete(null);
+                  setActivities([]);
+                  setPlan(null);
                   setScreen("landing");
                 }
-              }} style={{ background:"transparent", border:"none", color:"#374151", fontSize:11, cursor:"pointer", fontFamily:"'Inter',sans-serif", padding:"2px 6px", borderRadius:4 }} title="Reset profilo">⚙️</button>
+              }} style={{ background:"transparent", border:"none", color:"#374151", fontSize:13, cursor:"pointer", padding:"2px 4px", borderRadius:4 }} title="Disconnetti">⚙️</button>
             </div>
           </div>
         </header>
@@ -978,6 +1013,16 @@ export default function App() {
           {/* ── DASHBOARD TAB ── */}
           {tab === "dashboard" && (
             <div style={{ maxWidth:960, margin:"0 auto", padding:"20px 16px" }}>
+
+              {/* Ultima sincronizzazione */}
+              {localStorage.getItem("gc_lastRefresh") && (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", gap:5, marginBottom:8 }}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#374151" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  <span style={{ fontSize:10, color:"#374151", fontFamily:"'JetBrains Mono',monospace" }}>
+                    Aggiornato: {new Date(localStorage.getItem("gc_lastRefresh")).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
+                  </span>
+                </div>
+              )}
 
               {/* Stats row */}
               <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom:16 }}>
