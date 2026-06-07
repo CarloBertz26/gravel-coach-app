@@ -3,7 +3,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContai
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const STRAVA_CLIENT_ID = "253711";
-const STRAVA_BACKEND_URL = "https://progetto-xgi6w.vercel.app/api/strava-token";
+const STRAVA_BACKEND_URL = "/api/strava-token";
 const STRAVA_REDIRECT_URI = typeof window !== "undefined" ? window.location.origin + window.location.pathname : "";
 const STRAVA_SCOPE = "read,activity:read_all";
 
