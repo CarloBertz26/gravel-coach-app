@@ -65,14 +65,16 @@ async function fetchStravaActivities(token) {
 }
 
 // ─── AI CALLS ─────────────────────────────────────────────────────────────────
-async function callClaude(messages, max_tokens = 4000) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
+async function callClaude(messages, max_tokens = 5000) {
+  // Chiamata tramite backend Vercel — evita CORS e protegge la API key
+  const r = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens, messages }),
+    body: JSON.stringify({ messages, max_tokens }),
   });
+  if (!r.ok) throw new Error("Errore connessione al coach AI");
   const d = await r.json();
-  if (d.error) throw new Error(d.error.message);
+  if (d.error) throw new Error(d.error);
   return d.content.map(c => c.text || "").join("");
 }
 
@@ -278,6 +280,14 @@ export default function App() {
   const [activeDay, setActiveDay] = useState(0);
   const [selectedActivity, setSelectedActivity] = useState(null);
   const [noteText, setNoteText] = useState("");
+  // Calendario
+  const [calMonth, setCalMonth] = useState(new Date().getMonth());
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [showAddRide, setShowAddRide] = useState(false);
+  const [addRideDay, setAddRideDay] = useState(null);
+  const [addRideForm, setAddRideForm] = useState({ name:"", km:"", elev:"", duration:"", notes:"" });
+  const [manualRides, setManualRides] = useState([]);
+  const [selectedCalDay, setSelectedCalDay] = useState(null);
   const fileRef = useRef();
   const chatEndRef = useRef();
 
@@ -409,6 +419,64 @@ export default function App() {
 
   const completeOnboarding = () => {
     setScreen("main");
+  };
+
+  // ── CALENDAR HELPERS ──────────────────────────────────────────────────────
+  const calPrevMonth = () => {
+    if (calMonth === 0) { setCalMonth(11); setCalYear(y => y-1); }
+    else setCalMonth(m => m-1);
+  };
+  const calNextMonth = () => {
+    if (calMonth === 11) { setCalMonth(0); setCalYear(y => y+1); }
+    else setCalMonth(m => m+1);
+  };
+
+  const handleAddRide = () => {
+    if (!addRideForm.name || !addRideForm.km) return;
+    const dateStr = new Date(calYear, calMonth, addRideDay).toISOString();
+    const newRide = {
+      id: `manual_${Date.now()}`,
+      name: addRideForm.name,
+      sport_type: "Ride",
+      type: "Ride",
+      distance: parseFloat(addRideForm.km) * 1000,
+      total_elevation_gain: parseFloat(addRideForm.elev) || 0,
+      moving_time: (() => {
+        const parts = addRideForm.duration.split(":");
+        return parts.length === 2 ? parseInt(parts[0])*3600 + parseInt(parts[1])*60 : 0;
+      })(),
+      start_date: dateStr,
+      average_watts: null,
+      average_heartrate: null,
+      _manual: true,
+      _notes: addRideForm.notes,
+    };
+    setManualRides(prev => [...prev, newRide]);
+    setAddRideForm({ name:"", km:"", elev:"", duration:"", notes:"" });
+    setShowAddRide(false);
+    setAddRideDay(null);
+  };
+
+  const generateGPX = (session) => {
+    if (!session) return;
+    const gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="GravelCoachAI">
+  <metadata>
+    <name>${session.title}</name>
+    <desc>${session.description}</desc>
+  </metadata>
+  <trk>
+    <name>${session.title}</name>
+    <desc>Tipo: ${session.type} | Durata: ${session.duration} | Distanza: ${session.distance} | Dislivello: ${session.elevation} | Zone: ${session.zones}</desc>
+  </trk>
+</gpx>`;
+    const blob = new Blob([gpx], { type:"application/gpx+xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${session.title.replace(/\s+/g,"-").toLowerCase()}.gpx`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const formatTimer = (secs) => {
@@ -1190,106 +1258,277 @@ export default function App() {
           )}
 
           {/* ── CALENDAR TAB ── */}
-          {tab === "calendar" && (
-            <div style={{ maxWidth:960, margin:"0 auto", padding:"20px 16px" }}>
-              <div style={{ fontWeight:600, color:"#fff", marginBottom:16, display:"flex", alignItems:"center", gap:8 }}>
-                <IC n="cal" s={16} /> Calendario Attività
-              </div>
-              {/* Simple calendar grid */}
-              {(() => {
-                const now = new Date();
-                const year = now.getFullYear(), month = now.getMonth();
-                const firstDay = new Date(year, month, 1).getDay();
-                const daysInMonth = new Date(year, month+1, 0).getDate();
-                const actByDay = {};
-                activities.forEach(a => {
-                  const d = new Date(a.start_date);
-                  if (d.getMonth() === month && d.getFullYear() === year) {
-                    const k = d.getDate();
-                    actByDay[k] = [...(actByDay[k]||[]), a];
-                  }
-                });
-                const planByDay = {};
-                if (plan?.weeklyPlan) {
-                  const days = ["Domenica","Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato"];
-                  plan.weeklyPlan.forEach(p => {
-                    const idx = days.indexOf(p.day);
-                    if (idx >= 0) {
-                      for (let d = 1; d <= daysInMonth; d++) {
-                        if (new Date(year, month, d).getDay() === idx) {
-                          planByDay[d] = p;
-                        }
-                      }
+          {tab === "calendar" && (() => {
+            const allActivities = [...activities, ...manualRides];
+            const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
+            const firstDay = new Date(calYear, calMonth, 1).getDay();
+            const today = new Date();
+            const isCurrentMonth = calMonth === today.getMonth() && calYear === today.getFullYear();
+
+            // Attività per giorno
+            const actByDay = {};
+            allActivities.forEach(a => {
+              const d = new Date(a.start_date);
+              if (d.getMonth() === calMonth && d.getFullYear() === calYear) {
+                const k = d.getDate();
+                actByDay[k] = [...(actByDay[k]||[]), a];
+              }
+            });
+
+            // Piano per giorno (dal piano AI se esiste)
+            const planByDay = {};
+            if (plan?.weeklyPlan && !plan._error) {
+              const days = ["Domenica","Lunedì","Martedì","Mercoledì","Giovedì","Venerdì","Sabato"];
+              plan.weeklyPlan.forEach(p => {
+                const idx = days.indexOf(p.day);
+                if (idx >= 0) {
+                  for (let d = 1; d <= daysInMonth; d++) {
+                    if (new Date(calYear, calMonth, d).getDay() === idx) {
+                      planByDay[d] = p;
                     }
-                  });
+                  }
                 }
-                const cells = [];
-                const adj = firstDay === 0 ? 6 : firstDay - 1;
-                for (let i = 0; i < adj; i++) cells.push(null);
-                for (let d = 1; d <= daysInMonth; d++) cells.push(d);
-                return (
-                  <div className="card" style={{ padding:18 }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
-                      <span className="cond" style={{ fontSize:22, color:"#fff" }}>
-                        {now.toLocaleDateString("it-IT",{month:"long",year:"numeric"}).toUpperCase()}
-                      </span>
-                      <div style={{ display:"flex", gap:12 }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#FC4C02" }}><div style={{width:8,height:8,borderRadius:"50%",background:"#FC4C02"}}/> Attività</div>
-                        <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#0ea5e9" }}><div style={{width:8,height:8,borderRadius:"50%",background:"#0ea5e9"}}/> Piano</div>
+              });
+            }
+
+            // TSS per giorno
+            const tssByDay = {};
+            Object.entries(actByDay).forEach(([day, acts]) => {
+              tssByDay[day] = acts.reduce((s,a) => s + calcTSS(a.moving_time, a.average_watts, ftp), 0);
+            });
+            const maxTSS = Math.max(1, ...Object.values(tssByDay));
+
+            // Celle griglia
+            const cells = [];
+            const adj = firstDay === 0 ? 6 : firstDay - 1;
+            for (let i = 0; i < adj; i++) cells.push(null);
+            for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+            const selectedDayActs = selectedCalDay ? (actByDay[selectedCalDay] || []) : [];
+            const selectedDayPlan = selectedCalDay ? planByDay[selectedCalDay] : null;
+            const selectedDayTSS = selectedCalDay ? (tssByDay[selectedCalDay] || 0) : 0;
+
+            return (
+              <div style={{ maxWidth:960, margin:"0 auto", padding:"20px 16px" }}>
+
+                {/* Modal aggiungi uscita */}
+                {showAddRide && (
+                  <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={e => { if(e.target === e.currentTarget) setShowAddRide(false); }}>
+                    <div className="card" style={{ width:"100%", maxWidth:420, padding:24, border:"1px solid rgba(252,76,2,.3)" }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+                        <span style={{ fontWeight:700, color:"#fff", fontSize:15 }}>
+                          ➕ Aggiungi uscita — {addRideDay} {new Date(calYear, calMonth).toLocaleDateString("it-IT",{month:"long"})}
+                        </span>
+                        <button onClick={()=>setShowAddRide(false)} style={{ background:"none", border:"none", color:"#6b7280", fontSize:18, cursor:"pointer" }}>✕</button>
+                      </div>
+                      <div style={{ display:"grid", gap:10 }}>
+                        <div>
+                          <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:4 }}>Nome uscita *</label>
+                          <input value={addRideForm.name} onChange={e=>setAddRideForm(f=>({...f,name:e.target.value}))} placeholder="Es. Giro colline domenicale" />
+                        </div>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                          <div>
+                            <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:4 }}>Distanza (km) *</label>
+                            <input type="number" value={addRideForm.km} onChange={e=>setAddRideForm(f=>({...f,km:e.target.value}))} placeholder="Es. 45" />
+                          </div>
+                          <div>
+                            <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:4 }}>Dislivello (m)</label>
+                            <input type="number" value={addRideForm.elev} onChange={e=>setAddRideForm(f=>({...f,elev:e.target.value}))} placeholder="Es. 400" />
+                          </div>
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:4 }}>Durata (h:mm)</label>
+                          <input value={addRideForm.duration} onChange={e=>setAddRideForm(f=>({...f,duration:e.target.value}))} placeholder="Es. 1:45" />
+                        </div>
+                        <div>
+                          <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:4 }}>Note</label>
+                          <textarea value={addRideForm.notes} onChange={e=>setAddRideForm(f=>({...f,notes:e.target.value}))} placeholder="Come è andata?" style={{ minHeight:60 }} />
+                        </div>
+                        <div style={{ display:"flex", gap:8 }}>
+                          <button className="primary-btn" onClick={handleAddRide} disabled={!addRideForm.name || !addRideForm.km} style={{ flex:1, justifyContent:"center" }}>
+                            <IC n="check" s={14} /> Salva uscita
+                          </button>
+                          <button className="ghost-btn" onClick={()=>setShowAddRide(false)}>Annulla</button>
+                        </div>
                       </div>
                     </div>
-                    <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2, marginBottom:6 }}>
-                      {["Lun","Mar","Mer","Gio","Ven","Sab","Dom"].map(d => (
-                        <div key={d} style={{ textAlign:"center", fontSize:9, color:"#374151", padding:"4px 0", fontWeight:700, letterSpacing:".06em" }}>{d}</div>
-                      ))}
-                    </div>
-                    <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2 }}>
-                      {cells.map((d, i) => {
-                        const acts = d ? actByDay[d] : null;
-                        const planned = d ? planByDay[d] : null;
-                        const isToday = d === now.getDate();
-                        return (
-                          <div key={i} style={{ minHeight:52, background:d?(acts?"rgba(252,76,2,.08)":planned?"rgba(14,165,233,.06)":"#0a1120"):"transparent", borderRadius:7, border:`1px solid ${isToday?"#FC4C02":d?"rgba(255,255,255,.05)":"transparent"}`, padding:"4px 6px", cursor:d?"pointer":"default", transition:"background .15s" }}>
-                            {d && (
-                              <>
-                                <div style={{ fontSize:11, color:isToday?"#FC4C02":acts?"#e2e8f0":"#374151", fontWeight:isToday?700:400, marginBottom:2 }}>{d}</div>
-                                {acts?.map((a,idx) => (
-                                  <div key={idx} style={{ fontSize:8, color:"#FC4C02", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", lineHeight:1.3 }}>
-                                    ● {m2km(a.distance)}km
-                                  </div>
-                                ))}
-                                {!acts && planned && (
-                                  <div style={{ fontSize:8, color:ta(planned.type), lineHeight:1.3 }}>
-                                    ● {planned.type}
-                                  </div>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div style={{ marginTop:14, display:"flex", flexDirection:"column", gap:6 }}>
-                      {Object.entries(actByDay).sort(([a],[b])=>+b-+a).slice(0,4).map(([day, acts]) => (
-                        <div key={day} style={{ background:"#0a1120", borderRadius:8, padding:"10px 12px" }}>
-                          <div style={{ fontSize:10, color:"#4b5563", marginBottom:4, fontFamily:"'JetBrains Mono',monospace" }}>{day} {now.toLocaleDateString("it-IT",{month:"short"})} {year}</div>
-                          {acts.map(a => (
-                            <div key={a.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                              <span style={{ fontSize:12, color:"#94a3b8" }}>{a.name}</span>
-                              <div style={{ display:"flex", gap:8 }}>
-                                <span style={{ fontSize:11, color:"#FC4C02", fontFamily:"'JetBrains Mono',monospace" }}>{m2km(a.distance)}km</span>
-                                <span style={{ fontSize:11, color:"#0ea5e9", fontFamily:"'JetBrains Mono',monospace" }}>{Math.round(a.total_elevation_gain)}m↑</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
                   </div>
-                );
-              })()}
-            </div>
-          )}
+                )}
+
+                {/* Header calendario */}
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                    <button onClick={calPrevMonth} style={{ background:"rgba(255,255,255,.06)", border:"1px solid rgba(255,255,255,.1)", borderRadius:8, width:32, height:32, display:"flex", alignItems:"center", justifyContent:"center", color:"#e2e8f0", cursor:"pointer" }}>‹</button>
+                    <span className="cond" style={{ fontSize:22, color:"#fff", minWidth:200, textAlign:"center" }}>
+                      {new Date(calYear, calMonth).toLocaleDateString("it-IT",{month:"long",year:"numeric"}).toUpperCase()}
+                    </span>
+                    <button onClick={calNextMonth} style={{ background:"rgba(255,255,255,.06)", border:"1px solid rgba(255,255,255,.1)", borderRadius:8, width:32, height:32, display:"flex", alignItems:"center", justifyContent:"center", color:"#e2e8f0", cursor:"pointer" }}>›</button>
+                  </div>
+                  <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                    <div style={{ display:"flex", gap:10 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#FC4C02" }}><div style={{width:7,height:7,borderRadius:"50%",background:"#FC4C02"}}/> Uscita</div>
+                      <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#0ea5e9" }}><div style={{width:7,height:7,borderRadius:"50%",background:"#0ea5e9"}}/> Piano</div>
+                    </div>
+                    {isCurrentMonth && (
+                      <button onClick={()=>{ setCalMonth(today.getMonth()); setCalYear(today.getFullYear()); }} style={{ background:"rgba(255,255,255,.06)", border:"1px solid rgba(255,255,255,.1)", borderRadius:6, padding:"4px 10px", color:"#9ca3af", fontSize:11, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>Oggi</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Griglia calendario */}
+                <div className="card" style={{ padding:14, marginBottom:12 }}>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:1, marginBottom:6 }}>
+                    {["Lun","Mar","Mer","Gio","Ven","Sab","Dom"].map(d => (
+                      <div key={d} style={{ textAlign:"center", fontSize:9, color:"#4b5563", padding:"4px 0", fontWeight:700, letterSpacing:".06em" }}>{d}</div>
+                    ))}
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2 }}>
+                    {cells.map((d, i) => {
+                      const acts = d ? actByDay[d] : null;
+                      const planned = d ? planByDay[d] : null;
+                      const isToday = isCurrentMonth && d === today.getDate();
+                      const tss = d ? (tssByDay[d] || 0) : 0;
+                      const isSelected = d === selectedCalDay;
+                      const hasManual = acts?.some(a => a._manual);
+
+                      return (
+                        <div key={i} onClick={() => d && setSelectedCalDay(isSelected ? null : d)}
+                          style={{ minHeight:60, background: d ? (acts?"rgba(252,76,2,.08)" : planned?"rgba(14,165,233,.05)" : "rgba(255,255,255,.02)") : "transparent", borderRadius:8, border:`1px solid ${isSelected?"#FC4C02":isToday?"rgba(252,76,2,.5)":d?"rgba(255,255,255,.07)":"transparent"}`, padding:"5px 6px", cursor:d?"pointer":"default", transition:"all .15s", position:"relative" }}>
+                          {d && (
+                            <>
+                              <div style={{ fontSize:11, color:isToday?"#FC4C02":acts?"#e2e8f0":"#4b5563", fontWeight:isToday||isSelected?700:400, marginBottom:3 }}>{d}</div>
+                              {/* TSS bar */}
+                              {tss > 0 && (
+                                <div style={{ height:2, background:"rgba(252,76,2,.15)", borderRadius:1, marginBottom:3, overflow:"hidden" }}>
+                                  <div style={{ height:"100%", background:"#FC4C02", borderRadius:1, width:`${Math.min(100,(tss/maxTSS)*100)}%` }} />
+                                </div>
+                              )}
+                              {acts?.slice(0,2).map((a,idx) => (
+                                <div key={idx} style={{ fontSize:8, color: a._manual?"#22c55e":"#FC4C02", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", lineHeight:1.4 }}>
+                                  {a._manual?"✎":"●"} {m2km(a.distance)}km
+                                </div>
+                              ))}
+                              {!acts && planned && (
+                                <div style={{ fontSize:8, color:ta(planned.type), lineHeight:1.4 }}>● {planned.type}</div>
+                              )}
+                              {/* TSS badge */}
+                              {tss > 0 && (
+                                <div style={{ fontSize:7, color:"#4b5563", marginTop:2 }}>{tss} TSS</div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Dettaglio giorno selezionato */}
+                {selectedCalDay && (
+                  <div className="card slide-in" style={{ padding:18, marginBottom:12, border:"1px solid rgba(252,76,2,.2)" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                      <span className="cond" style={{ fontSize:20, color:"#fff" }}>
+                        {selectedCalDay} {new Date(calYear, calMonth).toLocaleDateString("it-IT",{month:"long"})} {calYear}
+                      </span>
+                      <div style={{ display:"flex", gap:8 }}>
+                        <button onClick={()=>{ setAddRideDay(selectedCalDay); setShowAddRide(true); }} className="primary-btn" style={{ fontSize:12, padding:"7px 14px" }}>
+                          + Aggiungi uscita
+                        </button>
+                        <button onClick={()=>setSelectedCalDay(null)} style={{ background:"none", border:"none", color:"#6b7280", cursor:"pointer", fontSize:16 }}>✕</button>
+                      </div>
+                    </div>
+
+                    {/* Uscite del giorno */}
+                    {selectedDayActs.length > 0 && (
+                      <div style={{ marginBottom:selectedDayPlan ? 14 : 0 }}>
+                        <div style={{ fontSize:10, color:"#FC4C02", fontWeight:700, textTransform:"uppercase", letterSpacing:".07em", marginBottom:8 }}>Uscite registrate</div>
+                        {selectedDayActs.map((a,i) => (
+                          <div key={i} style={{ background:"#0a1120", borderRadius:9, padding:"10px 14px", marginBottom:6 }}>
+                            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                              <div>
+                                <div style={{ fontSize:13, fontWeight:500, color:"#e2e8f0", marginBottom:4 }}>
+                                  {a._manual && <span style={{ fontSize:10, color:"#22c55e", marginRight:6 }}>✎ manuale</span>}
+                                  {a.name}
+                                </div>
+                                <div style={{ display:"flex", gap:10 }}>
+                                  <span style={{ fontSize:11, color:"#FC4C02", fontFamily:"'JetBrains Mono',monospace" }}>{m2km(a.distance)}km</span>
+                                  <span style={{ fontSize:11, color:"#0ea5e9", fontFamily:"'JetBrains Mono',monospace" }}>{Math.round(a.total_elevation_gain)}m↑</span>
+                                  {a.moving_time > 0 && <span style={{ fontSize:11, color:"#6b7280", fontFamily:"'JetBrains Mono',monospace" }}>{s2hhmm(a.moving_time)}</span>}
+                                  {a.average_watts && <span style={{ fontSize:11, color:"#f59e0b", fontFamily:"'JetBrains Mono',monospace" }}>{a.average_watts}W</span>}
+                                </div>
+                                {a._notes && <div style={{ fontSize:11, color:"#4b5563", marginTop:4, fontStyle:"italic" }}>"{a._notes}"</div>}
+                              </div>
+                              {calcTSS(a.moving_time, a.average_watts, ftp) > 0 && (
+                                <span style={{ fontSize:11, color:"#a855f7", fontFamily:"'JetBrains Mono',monospace", background:"rgba(168,85,247,.1)", borderRadius:6, padding:"3px 8px" }}>
+                                  {calcTSS(a.moving_time, a.average_watts, ftp)} TSS
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        {selectedDayTSS > 0 && (
+                          <div style={{ fontSize:12, color:"#4b5563", textAlign:"right" }}>
+                            Totale giorno: <span style={{ color:"#a855f7", fontWeight:600 }}>{selectedDayTSS} TSS</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Piano del giorno */}
+                    {selectedDayPlan && (
+                      <div style={{ background:tc(selectedDayPlan.type), border:`1px solid ${ta(selectedDayPlan.type)}33`, borderRadius:10, padding:14 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                          <div>
+                            <span className="pill" style={{ background:`${ta(selectedDayPlan.type)}18`, color:ta(selectedDayPlan.type), marginBottom:4 }}>{selectedDayPlan.type}</span>
+                            <div style={{ fontWeight:600, color:"#fff", fontSize:14 }}>{selectedDayPlan.title}</div>
+                          </div>
+                          <button onClick={() => generateGPX(selectedDayPlan)} style={{ background:"rgba(255,255,255,.06)", border:"1px solid rgba(255,255,255,.1)", borderRadius:7, padding:"6px 12px", color:"#9ca3af", fontSize:11, cursor:"pointer", fontFamily:"'Inter',sans-serif", display:"flex", alignItems:"center", gap:5 }}>
+                            <IC n="upload" s={12} /> GPX
+                          </button>
+                        </div>
+                        <div style={{ display:"flex", gap:12, marginBottom:8, flexWrap:"wrap" }}>
+                          {[[selectedDayPlan.duration,"🕐"],[selectedDayPlan.distance,"📍"],[selectedDayPlan.elevation,"⛰️"]].map(([v,ic]) => v && v !== "—" && (
+                            <span key={ic} style={{ fontSize:11, color:"#94a3b8", fontFamily:"'JetBrains Mono',monospace" }}>{ic} {v}</span>
+                          ))}
+                          {selectedDayPlan.tss > 0 && <span style={{ fontSize:11, color:"#a855f7", fontFamily:"'JetBrains Mono',monospace" }}>TSS ~{selectedDayPlan.tss}</span>}
+                        </div>
+                        <p style={{ fontSize:12, color:"#94a3b8", lineHeight:1.6 }}>{selectedDayPlan.description}</p>
+                      </div>
+                    )}
+
+                    {/* Giorno vuoto */}
+                    {selectedDayActs.length === 0 && !selectedDayPlan && (
+                      <div style={{ textAlign:"center", padding:"20px 0", color:"#374151" }}>
+                        <div style={{ fontSize:28, marginBottom:8 }}>😴</div>
+                        <div style={{ fontSize:13 }}>Nessuna attività — giorno di riposo</div>
+                        <button onClick={()=>{ setAddRideDay(selectedCalDay); setShowAddRide(true); }} style={{ marginTop:12, background:"transparent", border:"1px solid rgba(255,255,255,.08)", borderRadius:8, padding:"8px 16px", color:"#6b7280", fontSize:12, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                          + Aggiungi uscita manuale
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Riepilogo mese */}
+                <div className="card" style={{ padding:16 }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:"#fff", marginBottom:12, textTransform:"uppercase", letterSpacing:".06em" }}>📊 Riepilogo {new Date(calYear, calMonth).toLocaleDateString("it-IT",{month:"long"})}</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8 }}>
+                    {[
+                      { label:"Uscite", value: Object.values(actByDay).reduce((s,a)=>s+a.length,0), color:"#FC4C02" },
+                      { label:"km totali", value: Object.values(actByDay).flat().reduce((s,a)=>s+(a.distance/1000),0).toFixed(0), color:"#0ea5e9" },
+                      { label:"Dislivello", value: Object.values(actByDay).flat().reduce((s,a)=>s+a.total_elevation_gain,0).toFixed(0)+"m", color:"#22c55e" },
+                      { label:"TSS totale", value: Object.values(tssByDay).reduce((s,t)=>s+t,0), color:"#a855f7" },
+                    ].map(({label, value, color}) => (
+                      <div key={label} style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                        <div className="cond" style={{ fontSize:22, color, lineHeight:1 }}>{value}</div>
+                        <div style={{ fontSize:10, color:"#4b5563", marginTop:3 }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ── NOTES TAB ── */}
           {tab === "notes" && (
