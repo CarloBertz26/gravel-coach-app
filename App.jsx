@@ -3,7 +3,7 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContai
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const STRAVA_CLIENT_ID = "253711";
-const STRAVA_BACKEND_URL = "/api/strava-token";
+const STRAVA_BACKEND_URL = "https://progetto-xgi6w.vercel.app/api/strava-token";
 const STRAVA_REDIRECT_URI = typeof window !== "undefined" ? window.location.origin + window.location.pathname : "";
 const STRAVA_SCOPE = "read,activity:read_all";
 
@@ -14,7 +14,15 @@ const w2wkg = (w, kg) => (w / kg).toFixed(2);
 const fmtDate = (iso) => new Date(iso).toLocaleDateString("it-IT", { day: "2-digit", month: "short" });
 const fmtDateShort = (iso) => new Date(iso).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
 const daysUntil = (dateStr) => { const d = new Date(dateStr) - new Date(); return Math.max(0, Math.ceil(d / 86400000)); };
-const calcFTP = (avgWatts, weight) => Math.round(avgWatts * 0.95); // simplified FTP estimate from best efforts
+// FTP stimato: usa il 95% della potenza media delle 3 uscite più intense (proxy del 20min best)
+const calcFTP = (activities, weight) => {
+  const withWatts = activities.filter(a => a.average_watts > 0);
+  if (!withWatts.length) return 0;
+  const sorted = [...withWatts].sort((a,b) => b.average_watts - a.average_watts);
+  const top3 = sorted.slice(0, Math.min(3, sorted.length));
+  const avg = Math.round(top3.reduce((s,a) => s+a.average_watts, 0) / top3.length);
+  return Math.round(avg * 0.95);
+};
 const calcTSS = (duration_s, avgWatts, ftp) => { if (!avgWatts || !ftp) return 0; const IF = avgWatts / ftp; return Math.round((duration_s * avgWatts * IF) / (ftp * 3600) * 100); };
 
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
@@ -79,7 +87,7 @@ async function analyzeWithClaude(activities, goal, goalType, weight, goalDate) {
   const wattsArr = activities.filter(a => a.average_watts);
   const avgW = wattsArr.length ? Math.round(wattsArr.reduce((s,a)=>s+a.average_watts,0)/wattsArr.length) : 170;
   const maxW = wattsArr.length ? Math.max(...wattsArr.map(a=>a.average_watts)) : 220;
-  const ftp = calcFTP(avgW, weight);
+  const ftp = calcFTP(activities, weight);
   const avgElev = Math.round(activities.reduce((s,a)=>s+a.total_elevation_gain,0)/activities.length);
   const daysLeft = goalDate ? daysUntil(goalDate) : null;
 
@@ -219,13 +227,15 @@ const GLOBAL_CSS = `
   @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
   @keyframes slideIn { from { opacity:0; transform:translateX(16px); } to { opacity:1; transform:translateX(0); } }
   @keyframes glowPulse { 0%,100%{box-shadow:0 0 0 0 rgba(252,76,2,.4);} 50%{box-shadow:0 0 0 8px rgba(252,76,2,0);} }
+  @keyframes shimmer { 0%{background-position:-468px 0} 100%{background-position:468px 0} }
+  .skeleton { background:linear-gradient(90deg,#111827 25%,#1e2d40 50%,#111827 75%); background-size:468px 100%; animation:shimmer 1.5s ease-in-out infinite; border-radius:8px; }
   body { background:#080c12; }
   .app { font-family:'Inter',sans-serif; background:#080c12; color:#e2e8f0; min-height:100vh; }
   .mono { font-family:'JetBrains Mono',monospace; }
   .cond { font-family:'Barlow Condensed',sans-serif; font-weight:700; letter-spacing:.02em; }
   .fade-up { animation:fadeUp .45s ease both; }
   .slide-in { animation:slideIn .3s ease both; }
-  .card { background:#0d1520; border:1px solid rgba(255,255,255,.07); border-radius:14px; }
+  .card { background:#0d1520; border:1px solid rgba(255,255,255,.12); border-radius:14px; box-shadow:0 1px 3px rgba(0,0,0,.4); }
   .card-hover { transition:border-color .2s,transform .15s; cursor:pointer; }
   .card-hover:hover { border-color:rgba(252,76,2,.3); transform:translateY(-1px); }
   .pill { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:20px; font-size:10px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; }
@@ -285,11 +295,21 @@ const StatCard = ({ icon, label, value, unit, color, sub }) => (
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  const [screen, setScreen] = useState("landing"); // landing | loading | main
+  const [screen, setScreen] = useState("landing"); // landing | loading | onboarding | main
   const [tab, setTab] = useState("dashboard");      // dashboard | plan | calendar | notes | coach
   const [athlete, setAthlete] = useState(null);
   const [token, setToken] = useState(null);
   const [activities, setActivities] = useState([]);
+  // Onboarding
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [ftpMode, setFtpMode] = useState("auto"); // auto | manual | ramp
+  const [ftpManual, setFtpManual] = useState("");
+  const [rampPhase, setRampPhase] = useState("idle"); // idle | warmup | test | result
+  const [rampTimer, setRampTimer] = useState(0);
+  const [rampInterval, setRampInterval] = useState(null);
+  const [bikeType, setBikeType] = useState("gravel"); // road | gravel | both
+  const [daysPerWeek, setDaysPerWeek] = useState(4);
+  const [userName, setUserName] = useState("");
   const [plan, setPlan] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [weight, setWeight] = useState(70);
@@ -324,7 +344,8 @@ export default function App() {
         .then((acts) => {
           const rides = acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
           setActivities(rides);
-          setScreen("main");
+          setOnboardingStep(0);
+          setScreen("onboarding");
           window.history.replaceState({}, "", window.location.pathname);
         })
         .catch((err) => {
@@ -343,7 +364,8 @@ export default function App() {
       setAthlete({ firstname:"Carlo", lastname:"R." });
       setToken("MOCK");
       setActivities(getMockActivities());
-      setScreen("main");
+      setOnboardingStep(0);
+      setScreen("onboarding");
     }, 2000);
   };
 
@@ -358,7 +380,9 @@ export default function App() {
       setTab("plan");
     } catch(e) {
       console.error(e);
-      alert("Errore nell'analisi AI: " + e.message);
+      // Mostra errore inline invece di alert
+      setPlan({ _error: true, _errorMsg: e.message });
+      setTab("plan");
     }
     setAnalyzing(false);
   };
@@ -378,12 +402,56 @@ export default function App() {
     setChatLoading(false);
   };
 
+  // ── RAMP TEST ─────────────────────────────────────────────────────────────
+  const startRamp = () => {
+    setRampPhase("warmup");
+    setRampTimer(600); // 10min warmup
+    const iv = setInterval(() => {
+      setRampTimer(prev => {
+        if (prev <= 1) {
+          clearInterval(iv);
+          setRampPhase("test");
+          setRampTimer(1200); // 20min test
+          const testIv = setInterval(() => {
+            setRampTimer(prev2 => {
+              if (prev2 <= 1) {
+                clearInterval(testIv);
+                setRampPhase("result");
+                return 0;
+              }
+              return prev2 - 1;
+            });
+          }, 1000);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    setRampInterval(iv);
+  };
+
+  const stopRamp = () => {
+    if (rampInterval) clearInterval(rampInterval);
+    setRampPhase("idle");
+    setRampTimer(0);
+  };
+
+  const completeOnboarding = () => {
+    setScreen("main");
+  };
+
+  const formatTimer = (secs) => {
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
   // ── DERIVED STATS ──────────────────────────────────────────────────────────
   const totalKm = activities.reduce((s,a) => s+a.distance, 0)/1000;
   const totalElev = activities.reduce((s,a) => s+a.total_elevation_gain, 0);
   const wattsArr = activities.filter(a => a.average_watts);
   const avgW = wattsArr.length ? Math.round(wattsArr.reduce((s,a)=>s+a.average_watts,0)/wattsArr.length) : 0;
-  const ftp = calcFTP(avgW, weight);
+  // FTP: usa manuale se inserito, altrimenti calcola dalle uscite
+  const ftp = ftpManual && parseInt(ftpManual) > 0 ? parseInt(ftpManual) : calcFTP(activities, weight);
   const weeklyTSS = activities.slice(0,5).reduce((s,a) => s + calcTSS(a.moving_time, a.average_watts, ftp), 0);
 
   // Chart data
@@ -398,6 +466,263 @@ export default function App() {
 
   // Periodization chart
   const periodData = plan?.periodization?.map(w => ({ week:`S${w.week}`, tss:w.tssTarget, focus:w.focus })) || [];
+
+  // ── ONBOARDING ────────────────────────────────────────────────────────────
+  if (screen === "onboarding") {
+    const STEPS = ["Benvenuto", "Tipo di bici", "Il tuo peso", "FTP", "Giorni/settimana", "Pronto!"];
+    const totalSteps = STEPS.length;
+    const progress = ((onboardingStep + 1) / totalSteps) * 100;
+
+    const stepContent = () => {
+      // STEP 0 — Welcome
+      if (onboardingStep === 0) return (
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:56, marginBottom:16 }}>👋</div>
+          <h2 className="cond" style={{ fontSize:34, color:"#fff", marginBottom:12 }}>
+            Ciao, {athlete?.firstname || "Atleta"}!
+          </h2>
+          <p style={{ color:"#64748b", fontSize:14, lineHeight:1.7, marginBottom:32 }}>
+            Benvenuto in Gravel Coach AI. Ti faccio 4 domande veloci per configurare il tuo profilo e generare un piano di allenamento su misura per te.
+          </p>
+          <div style={{ display:"grid", gap:10, marginBottom:24 }}>
+            {[["🚴", "Piano settimanale personalizzato"], ["⚡", "Zone di potenza calibrate su di te"], ["🤖", "Coach AI sempre disponibile"], ["📊", "Analisi delle tue uscite Strava"]].map(([ic, txt]) => (
+              <div key={txt} style={{ display:"flex", alignItems:"center", gap:12, background:"rgba(255,255,255,.04)", border:"1px solid rgba(255,255,255,.08)", borderRadius:10, padding:"10px 14px" }}>
+                <span style={{ fontSize:20 }}>{ic}</span>
+                <span style={{ fontSize:13, color:"#e2e8f0" }}>{txt}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      // STEP 1 — Bike type
+      if (onboardingStep === 1) return (
+        <div>
+          <div style={{ textAlign:"center", marginBottom:24 }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>🚵</div>
+            <h2 className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Che tipo di bici usi?</h2>
+            <p style={{ color:"#64748b", fontSize:13 }}>Questo personalizza il piano e le sessioni consigliate</p>
+          </div>
+          <div style={{ display:"grid", gap:10 }}>
+            {[["gravel","🪨 Gravel","Terreni misti, avventura, fondi sterrati"],["road","🛣️ Road","Asfalto, velocità, granfondo"],["both","🔄 Entrambe","Uso entrambe le bici regolarmente"]].map(([val, label, sub]) => (
+              <div key={val} onClick={() => setBikeType(val)} style={{ padding:"16px 20px", border:`2px solid ${bikeType===val?"#FC4C02":"rgba(255,255,255,.08)"}`, borderRadius:12, background:bikeType===val?"rgba(252,76,2,.1)":"rgba(255,255,255,.02)", cursor:"pointer", transition:"all .2s" }}>
+                <div style={{ fontWeight:600, color: bikeType===val?"#FC4C02":"#e2e8f0", marginBottom:4 }}>{label}</div>
+                <div style={{ fontSize:12, color:"#64748b" }}>{sub}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+      // STEP 2 — Weight
+      if (onboardingStep === 2) return (
+        <div>
+          <div style={{ textAlign:"center", marginBottom:28 }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>⚖️</div>
+            <h2 className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Il tuo peso corporeo</h2>
+            <p style={{ color:"#64748b", fontSize:13 }}>Serve per calcolare W/kg e calibrare le zone di potenza</p>
+          </div>
+          <div style={{ textAlign:"center" }}>
+            <div style={{ display:"inline-flex", alignItems:"center", gap:16, background:"rgba(255,255,255,.04)", border:"1px solid rgba(255,255,255,.1)", borderRadius:16, padding:"20px 32px" }}>
+              <button onClick={() => setWeight(w => Math.max(40, w-1))} style={{ width:40, height:40, borderRadius:"50%", background:"rgba(255,255,255,.08)", border:"none", color:"#fff", fontSize:20, cursor:"pointer" }}>−</button>
+              <div style={{ textAlign:"center" }}>
+                <div className="cond" style={{ fontSize:52, color:"#FC4C02", lineHeight:1 }}>{weight}</div>
+                <div style={{ fontSize:12, color:"#64748b" }}>kg</div>
+              </div>
+              <button onClick={() => setWeight(w => Math.min(130, w+1))} style={{ width:40, height:40, borderRadius:"50%", background:"rgba(255,255,255,.08)", border:"none", color:"#fff", fontSize:20, cursor:"pointer" }}>+</button>
+            </div>
+            <p style={{ marginTop:16, fontSize:12, color:"#374151" }}>Puoi modificarlo in qualsiasi momento nelle impostazioni</p>
+          </div>
+        </div>
+      );
+
+      // STEP 3 — FTP
+      if (onboardingStep === 3) return (
+        <div>
+          <div style={{ textAlign:"center", marginBottom:20 }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>⚡</div>
+            <h2 className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Conosci il tuo FTP?</h2>
+            <p style={{ color:"#64748b", fontSize:13 }}>Functional Threshold Power — la potenza massima sostenibile per ~60 minuti</p>
+          </div>
+          <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+            {[["auto","🤖 Calcola auto"],["manual","✏️ Inserisci"],["ramp","🧪 Ramp Test"]].map(([mode, label]) => (
+              <button key={mode} onClick={() => { setFtpMode(mode); setRampPhase("idle"); }} style={{ flex:1, padding:"10px 8px", borderRadius:10, border:`2px solid ${ftpMode===mode?"#FC4C02":"rgba(255,255,255,.08)"}`, background:ftpMode===mode?"rgba(252,76,2,.1)":"transparent", color:ftpMode===mode?"#FC4C02":"#64748b", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {ftpMode === "auto" && (
+            <div style={{ background:"rgba(14,165,233,.08)", border:"1px solid rgba(14,165,233,.2)", borderRadius:12, padding:"16px 20px", textAlign:"center" }}>
+              <div className="cond" style={{ fontSize:36, color:"#0ea5e9", marginBottom:4 }}>{calcFTP(activities, weight)}W</div>
+              <div style={{ fontSize:12, color:"#64748b" }}>FTP stimato dalle tue {activities.length} uscite Strava</div>
+              <div style={{ fontSize:11, color:"#374151", marginTop:8 }}>Calcolato usando le 3 uscite più intense — puoi affinarlo con un Ramp Test in futuro</div>
+            </div>
+          )}
+
+          {ftpMode === "manual" && (
+            <div>
+              <label style={{ fontSize:12, color:"#64748b", display:"block", marginBottom:8 }}>Inserisci il tuo FTP (Watt)</label>
+              <input type="number" value={ftpManual} onChange={e => setFtpManual(e.target.value)} placeholder="es. 220" min="80" max="500" style={{ textAlign:"center", fontSize:24, fontWeight:700, color:"#FC4C02" }} />
+              <p style={{ fontSize:11, color:"#374151", marginTop:8, textAlign:"center" }}>Puoi trovarlo sul tuo Garmin, Wahoo o dall'ultima gara/test</p>
+            </div>
+          )}
+
+          {ftpMode === "ramp" && (
+            <div>
+              {rampPhase === "idle" && (
+                <div style={{ background:"rgba(255,255,255,.03)", border:"1px solid rgba(255,255,255,.08)", borderRadius:12, padding:"16px 20px" }}>
+                  <div style={{ fontWeight:600, color:"#fff", marginBottom:8 }}>Protocollo Ramp Test</div>
+                  <div style={{ fontSize:12, color:"#64748b", lineHeight:1.7, marginBottom:16 }}>
+                    <b style={{color:"#e2e8f0"}}>1.</b> Warm-up 10 min in Z1-Z2 (facile)<br/>
+                    <b style={{color:"#e2e8f0"}}>2.</b> Test 20 min al massimo sforzo sostenibile<br/>
+                    <b style={{color:"#e2e8f0"}}>3.</b> L'app calcola il tuo FTP automaticamente
+                  </div>
+                  <button onClick={startRamp} className="primary-btn" style={{ width:"100%", justifyContent:"center" }}>
+                    ▶ Inizia Ramp Test
+                  </button>
+                </div>
+              )}
+              {(rampPhase === "warmup" || rampPhase === "test") && (
+                <div style={{ textAlign:"center" }}>
+                  <div style={{ fontSize:11, fontWeight:700, color:"#FC4C02", textTransform:"uppercase", letterSpacing:".1em", marginBottom:8 }}>
+                    {rampPhase === "warmup" ? "FASE WARM-UP" : "FASE TEST — SPINGI AL MASSIMO"}
+                  </div>
+                  <div className="cond" style={{ fontSize:72, color: rampPhase==="test"?"#ef4444":"#0ea5e9", lineHeight:1, marginBottom:8 }}>
+                    {formatTimer(rampTimer)}
+                  </div>
+                  <div style={{ fontSize:12, color:"#64748b", marginBottom:20 }}>
+                    {rampPhase === "warmup" ? "Pedala leggero in Z1-Z2 per scaldarti" : "Mantieni il massimo sforzo sostenibile per 20 minuti"}
+                  </div>
+                  <div style={{ height:4, background:"#1a2535", borderRadius:2, marginBottom:16, overflow:"hidden" }}>
+                    <div style={{ height:"100%", background:rampPhase==="test"?"#ef4444":"#0ea5e9", borderRadius:2, width: rampPhase==="warmup" ? `${((600-rampTimer)/600)*100}%` : `${((1200-rampTimer)/1200)*100}%`, transition:"width 1s linear" }} />
+                  </div>
+                  <button onClick={stopRamp} style={{ background:"transparent", border:"1px solid rgba(255,255,255,.1)", borderRadius:8, padding:"8px 20px", color:"#64748b", fontSize:12, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                    Annulla test
+                  </button>
+                </div>
+              )}
+              {rampPhase === "result" && (
+                <div style={{ textAlign:"center" }}>
+                  <div style={{ fontSize:40, marginBottom:8 }}>🎉</div>
+                  <div style={{ fontSize:13, color:"#64748b", marginBottom:8 }}>FTP stimato dal test</div>
+                  <div className="cond" style={{ fontSize:56, color:"#FC4C02", marginBottom:4 }}>{calcFTP(activities, weight)}W</div>
+                  <div style={{ fontSize:12, color:"#64748b", marginBottom:16 }}>{w2wkg(calcFTP(activities, weight), weight)} W/kg</div>
+                  <p style={{ fontSize:11, color:"#374151" }}>Ottimo lavoro! Inserisci manualmente la potenza media degli ultimi 20 min per un risultato preciso</p>
+                  <input type="number" value={ftpManual} onChange={e => setFtpManual(e.target.value)} placeholder="Potenza media 20min (W)" style={{ marginTop:12, textAlign:"center" }} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+
+      // STEP 4 — Days per week
+      if (onboardingStep === 4) return (
+        <div>
+          <div style={{ textAlign:"center", marginBottom:28 }}>
+            <div style={{ fontSize:48, marginBottom:12 }}>📅</div>
+            <h2 className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Quante volte pedali a settimana?</h2>
+            <p style={{ color:"#64748b", fontSize:13 }}>Il coach calibra il volume e il recupero in base alla tua disponibilità</p>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+            {[2,3,4,5,6,7].map(d => (
+              <div key={d} onClick={() => setDaysPerWeek(d)} style={{ padding:"20px 0", textAlign:"center", border:`2px solid ${daysPerWeek===d?"#FC4C02":"rgba(255,255,255,.08)"}`, borderRadius:12, background:daysPerWeek===d?"rgba(252,76,2,.1)":"rgba(255,255,255,.02)", cursor:"pointer", transition:"all .2s" }}>
+                <div className="cond" style={{ fontSize:36, color:daysPerWeek===d?"#FC4C02":"#fff" }}>{d}</div>
+                <div style={{ fontSize:11, color:"#64748b" }}>giorni</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop:16, padding:"12px 16px", background:"rgba(255,255,255,.03)", borderRadius:10, fontSize:12, color:"#64748b", textAlign:"center" }}>
+            {daysPerWeek <= 3 ? "Piano con ampio recupero — ideale per chi inizia o ha poco tempo" :
+             daysPerWeek <= 5 ? "Piano bilanciato — ottimo per progressione costante" :
+             "Piano ad alto volume — assicurati di recuperare bene"}
+          </div>
+        </div>
+      );
+
+      // STEP 5 — Ready
+      if (onboardingStep === 5) return (
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:64, marginBottom:16 }}>🚀</div>
+          <h2 className="cond" style={{ fontSize:34, color:"#fff", marginBottom:12 }}>Tutto pronto!</h2>
+          <p style={{ color:"#64748b", fontSize:14, lineHeight:1.7, marginBottom:24 }}>
+            Il tuo profilo è configurato. Ora vai nella Dashboard, imposta il tuo obiettivo e genera il primo piano di allenamento personalizzato.
+          </p>
+          <div style={{ background:"rgba(255,255,255,.04)", border:"1px solid rgba(255,255,255,.08)", borderRadius:14, padding:"20px", marginBottom:24, textAlign:"left" }}>
+            <div style={{ fontWeight:600, color:"#e2e8f0", marginBottom:12, fontSize:13 }}>Il tuo profilo</div>
+            {[
+              ["Bici", bikeType === "gravel" ? "🪨 Gravel" : bikeType === "road" ? "🛣️ Road" : "🔄 Entrambe"],
+              ["Peso", `${weight} kg`],
+              ["FTP", `${ftpManual && parseInt(ftpManual) > 0 ? parseInt(ftpManual) : calcFTP(activities, weight)} W (${w2wkg(ftpManual && parseInt(ftpManual) > 0 ? parseInt(ftpManual) : calcFTP(activities, weight), weight)} W/kg)`],
+              ["Giorni/settimana", `${daysPerWeek} uscite`],
+              ["Attività caricate", `${activities.length} uscite da Strava`],
+            ].map(([label, value]) => (
+              <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:"1px solid rgba(255,255,255,.05)" }}>
+                <span style={{ fontSize:12, color:"#64748b" }}>{label}</span>
+                <span style={{ fontSize:12, color:"#e2e8f0", fontWeight:500 }}>{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const canProceed = () => {
+      if (onboardingStep === 3 && ftpMode === "manual" && (!ftpManual || parseInt(ftpManual) < 80)) return false;
+      if (onboardingStep === 3 && ftpMode === "ramp" && rampPhase !== "idle" && rampPhase !== "result") return false;
+      return true;
+    };
+
+    return (
+      <>
+        <style>{GLOBAL_CSS}</style>
+        <div className="app" style={{ minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"24px 20px" }}>
+          {/* bg */}
+          <div style={{ position:"fixed", inset:0, background:"radial-gradient(ellipse 80% 60% at 50% -10%, rgba(252,76,2,.1) 0%, transparent 60%)", pointerEvents:"none" }} />
+
+          <div style={{ maxWidth:460, width:"100%", position:"relative", zIndex:1 }}>
+            {/* Header */}
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:32 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ background:"#FC4C02", borderRadius:7, padding:"5px 7px", display:"flex" }}><IC n="bike" s={16} /></div>
+                <span className="cond" style={{ fontSize:18, color:"#fff" }}>GRAVEL COACH</span>
+              </div>
+              <div style={{ fontSize:12, color:"#374151" }}>{onboardingStep + 1} / {STEPS.length}</div>
+            </div>
+
+            {/* Progress bar */}
+            <div style={{ height:3, background:"#1a2535", borderRadius:2, marginBottom:32, overflow:"hidden" }}>
+              <div style={{ height:"100%", background:"linear-gradient(90deg,#FC4C02,#ff7c45)", borderRadius:2, width:`${progress}%`, transition:"width .4s ease" }} />
+            </div>
+
+            {/* Step content */}
+            <div className="card" style={{ padding:"28px 24px", marginBottom:20, border:"1px solid rgba(255,255,255,.1)" }}>
+              {stepContent()}
+            </div>
+
+            {/* Navigation */}
+            <div style={{ display:"flex", gap:12 }}>
+              {onboardingStep > 0 && (
+                <button onClick={() => setOnboardingStep(s => s-1)} className="ghost-btn" style={{ flex:1 }}>
+                  ← Indietro
+                </button>
+              )}
+              {onboardingStep < STEPS.length - 1 ? (
+                <button onClick={() => { if(canProceed()) setOnboardingStep(s => s+1); }} disabled={!canProceed()} className="primary-btn" style={{ flex:2, justifyContent:"center" }}>
+                  Avanti →
+                </button>
+              ) : (
+                <button onClick={completeOnboarding} className="primary-btn" style={{ flex:2, justifyContent:"center", fontSize:15 }}>
+                  <IC n="zap" s={16} /> Inizia ad allenarti!
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   // ── LANDING ────────────────────────────────────────────────────────────────
   if (screen === "landing") return (
@@ -486,17 +811,21 @@ export default function App() {
 
         {/* ANALYZING OVERLAY */}
         {analyzing && (
-          <div style={{ position:"fixed", inset:0, background:"rgba(8,12,18,.92)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", backdropFilter:"blur(8px)" }}>
-            <div style={{ textAlign:"center", maxWidth:360 }}>
-              <div style={{ color:"#FC4C02", marginBottom:20 }}><IC n="spin" s={52} /></div>
-              <p className="cond" style={{ fontSize:42, color:"#fff", marginBottom:10 }}>ANALISI IN CORSO</p>
-              <p style={{ color:"#4b5563", fontSize:13, lineHeight:1.7 }}>Il coach sta elaborando {activities.length} attività, calcolando FTP, TSS e costruendo il tuo piano personalizzato…</p>
-              {["Analisi volume e intensità…","Calcolo FTP e zone potenza…","Valutazione TSS settimanale…","Generazione piano periodizzato…","Definizione metriche target…"].map((s,i) => (
-                <div key={i} style={{ display:"flex", alignItems:"center", gap:8, marginTop:12, animation:`fadeUp .4s ease both ${i*.12}s` }}>
-                  <IC n="spin" s={10} />
-                  <span style={{ fontSize:12, color:"#374151" }}>{s}</span>
-                </div>
-              ))}
+          <div style={{ position:"fixed", inset:0, background:"rgba(8,12,18,.95)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", backdropFilter:"blur(12px)" }}>
+            <div style={{ textAlign:"center", maxWidth:380, padding:"0 24px" }}>
+              <div style={{ width:64, height:64, borderRadius:"50%", background:"rgba(252,76,2,.15)", border:"2px solid rgba(252,76,2,.3)", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 24px", color:"#FC4C02" }}>
+                <IC n="spin" s={32} />
+              </div>
+              <p className="cond" style={{ fontSize:38, color:"#fff", marginBottom:8 }}>IL COACH LAVORA</p>
+              <p style={{ color:"#4b5563", fontSize:13, lineHeight:1.7, marginBottom:24 }}>Analisi di {activities.length} uscite in corso — FTP, TSS, periodizzazione e piano su misura per il tuo obiettivo…</p>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {["Analisi volume e intensità…","Calcolo FTP e zone potenza…","Valutazione TSS settimanale…","Generazione piano periodizzato…","Definizione metriche target…"].map((s,i) => (
+                  <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 12px", background:"rgba(255,255,255,.03)", borderRadius:8, animation:`fadeUp .4s ease both ${i*.1}s` }}>
+                    <div style={{ width:20, height:20, borderRadius:"50%", background:"rgba(252,76,2,.15)", border:"1px solid rgba(252,76,2,.3)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, color:"#FC4C02" }}><IC n="spin" s={10} /></div>
+                    <span style={{ fontSize:12, color:"#64748b" }}>{s}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
