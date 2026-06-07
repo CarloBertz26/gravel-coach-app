@@ -291,6 +291,8 @@ export default function App() {
   // Tranche 5 — Engagement
   const [showNutrition, setShowNutrition] = useState(false);
   const [nutritionRideKm, setNutritionRideKm] = useState(50);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
   const fileRef = useRef();
   const chatEndRef = useRef();
 
