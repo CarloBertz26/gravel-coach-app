@@ -251,27 +251,27 @@ const StatCard = ({ icon, label, value, unit, color, sub }) => (
 export default function App() {
   const [screen, setScreen] = useState("landing"); // landing | loading | onboarding | main
   const [tab, setTab] = useState("dashboard");      // dashboard | plan | calendar | notes | coach
-  const [athlete, setAthlete] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_athlete")||"null"); } catch { return null; } });
-  const [token, setToken] = useState(() => localStorage.getItem("gc_token")||null);
-  const [activities, setActivities] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_activities")||"[]"); } catch { return []; } });
+  const [athlete, setAthlete] = useState(null);
+  const [token, setToken] = useState(null);
+  const [activities, setActivities] = useState([]);
   // Onboarding
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [ftpMode, setFtpMode] = useState("auto"); // auto | manual | ramp
-  const [ftpManual, setFtpManual] = useState(() => localStorage.getItem("gc_ftpManual")||"");
+  const [ftpManual, setFtpManual] = useState("");
   const [rampPhase, setRampPhase] = useState("idle"); // idle | warmup | test | result
   const [rampTimer, setRampTimer] = useState(0);
   const [rampInterval, setRampInterval] = useState(null);
-  const [bikeType, setBikeType] = useState(() => localStorage.getItem("gc_bikeType")||"gravel");
-  const [daysPerWeek, setDaysPerWeek] = useState(() => parseInt(localStorage.getItem("gc_daysPerWeek")||"4"));
+  const [bikeType, setBikeType] = useState("gravel");
+  const [daysPerWeek, setDaysPerWeek] = useState(4);
   const [userName, setUserName] = useState("");
   const [plan, setPlan] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [weight, setWeight] = useState(() => parseInt(localStorage.getItem("gc_weight")||"70"));
-  const [goalType, setGoalType] = useState(() => localStorage.getItem("gc_goalType")||"route");
-  const [goalText, setGoalText] = useState(() => localStorage.getItem("gc_goalText")||"");
-  const [goalDate, setGoalDate] = useState(() => localStorage.getItem("gc_goalDate")||"");
+  const [weight, setWeight] = useState(70);
+  const [goalType, setGoalType] = useState("route");
+  const [goalText, setGoalText] = useState("");
+  const [goalDate, setGoalDate] = useState("");
   const [gpxFile, setGpxFile] = useState(null);
-  const [notes, setNotes] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_notes")||"{}"); } catch { return {}; } });
+  const [notes, setNotes] = useState({});
   const [chatMessages, setChatMessages] = useState([
     { role:"assistant", content:"Ciao! Sono il tuo coach. Analizza le tue attività e imposta un obiettivo per iniziare. Poi posso rispondere a qualsiasi domanda sul tuo allenamento." }
   ]);
@@ -286,7 +286,7 @@ export default function App() {
   const [showAddRide, setShowAddRide] = useState(false);
   const [addRideDay, setAddRideDay] = useState(null);
   const [addRideForm, setAddRideForm] = useState({ name:"", km:"", elev:"", duration:"", notes:"" });
-  const [manualRides, setManualRides] = useState(() => { try { return JSON.parse(localStorage.getItem("gc_manualRides")||"[]"); } catch { return []; } });
+  const [manualRides, setManualRides] = useState([]);
   const [selectedCalDay, setSelectedCalDay] = useState(null);
   // Tranche 5 — Engagement
   const [showNutrition, setShowNutrition] = useState(false);
@@ -294,16 +294,34 @@ export default function App() {
   const fileRef = useRef();
   const chatEndRef = useRef();
 
-  // Auto-login all'avvio se token e attività già salvati
+  // Auto-login all'avvio se sessione salvata
   useEffect(() => {
-    const savedToken = localStorage.getItem("gc_token");
-    const savedAthlete = localStorage.getItem("gc_athlete");
-    const savedActivities = localStorage.getItem("gc_activities");
-    const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
-    if (savedToken && savedAthlete && savedActivities && alreadyOnboarded) {
-      // Già loggato — vai direttamente in dashboard
-      setScreen("main");
-      return;
+    try {
+      const savedToken = localStorage.getItem("gc_token");
+      const savedAthlete = localStorage.getItem("gc_athlete");
+      const savedActivities = localStorage.getItem("gc_activities");
+      const alreadyOnboarded = localStorage.getItem("gc_onboarded") === "true";
+      if (savedToken && savedAthlete && savedActivities && alreadyOnboarded) {
+        setToken(savedToken);
+        setAthlete(JSON.parse(savedAthlete));
+        setActivities(JSON.parse(savedActivities));
+        // Carica anche preferenze profilo
+        const w = localStorage.getItem("gc_weight"); if (w) setWeight(parseInt(w));
+        const bt = localStorage.getItem("gc_bikeType"); if (bt) setBikeType(bt);
+        const dpw = localStorage.getItem("gc_daysPerWeek"); if (dpw) setDaysPerWeek(parseInt(dpw));
+        const ftp = localStorage.getItem("gc_ftpManual"); if (ftp) setFtpManual(ftp);
+        const gt = localStorage.getItem("gc_goalType"); if (gt) setGoalType(gt);
+        const gtxt = localStorage.getItem("gc_goalText"); if (gtxt) setGoalText(gtxt);
+        const gd = localStorage.getItem("gc_goalDate"); if (gd) setGoalDate(gd);
+        const n = localStorage.getItem("gc_notes"); if (n) setNotes(JSON.parse(n));
+        const mr = localStorage.getItem("gc_manualRides"); if (mr) setManualRides(JSON.parse(mr));
+        setScreen("main");
+        return;
+      }
+    } catch(e) {
+      console.error("Errore caricamento sessione:", e);
+      // Se qualcosa va storto, pulisci e vai alla landing
+      localStorage.clear();
     }
   }, []);
 
