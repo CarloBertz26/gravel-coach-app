@@ -77,96 +77,48 @@ async function callClaude(messages, max_tokens = 4000) {
 }
 
 async function analyzeWithClaude(activities, goal, goalType, weight, goalDate) {
-  const acts = activities.slice(0, 12).map(a => ({
+  const acts = activities.slice(0, 10).map(a => ({
     date: fmtDate(a.start_date), name: a.name, km: m2km(a.distance),
     duration: s2hhmm(a.moving_time), elev: Math.round(a.total_elevation_gain),
     watts: a.average_watts || null, hr: a.average_heartrate || null,
-    suffer: a.suffer_score || null, type: a.sport_type,
+    type: a.sport_type,
   }));
   const totalKm = (activities.reduce((s,a) => s+a.distance, 0)/1000).toFixed(0);
   const wattsArr = activities.filter(a => a.average_watts);
   const avgW = wattsArr.length ? Math.round(wattsArr.reduce((s,a)=>s+a.average_watts,0)/wattsArr.length) : 170;
-  const maxW = wattsArr.length ? Math.max(...wattsArr.map(a=>a.average_watts)) : 220;
   const ftp = calcFTP(activities, weight);
   const avgElev = Math.round(activities.reduce((s,a)=>s+a.total_elevation_gain,0)/activities.length);
   const daysLeft = goalDate ? daysUntil(goalDate) : null;
 
-  const prompt = `Sei un coach professionista di ciclismo (road + gravel), con esperienza in periodizzazione, potenza e analisi HR. Analizza l'atleta e crea un piano dettagliato.
+  // Zone di potenza calcolate lato client — non chiediamo all'AI di calcolarle
+  const zones = [
+    {zone:"Z1 Recupero", min:0, max:Math.round(ftp*0.55), color:"#6b7280"},
+    {zone:"Z2 Endurance", min:Math.round(ftp*0.56), max:Math.round(ftp*0.75), color:"#3b82f6"},
+    {zone:"Z3 Tempo", min:Math.round(ftp*0.76), max:Math.round(ftp*0.9), color:"#10b981"},
+    {zone:"Z4 Soglia", min:Math.round(ftp*0.91), max:Math.round(ftp*1.05), color:"#f59e0b"},
+    {zone:"Z5 VO2max", min:Math.round(ftp*1.06), max:Math.round(ftp*1.2), color:"#ef4444"},
+    {zone:"Z6 Anaerobica", min:Math.round(ftp*1.21), max:999, color:"#a855f7"},
+  ];
 
-PROFILO ATLETA:
-- Peso: ${weight}kg
-- FTP stimato: ${ftp}W (${w2wkg(ftp,weight)} W/kg)
-- Potenza media uscite: ${avgW}W | Picco: ${maxW}W
-- Volume ultimi 30gg: ${totalKm}km
-- Dislivello medio per uscita: ${avgElev}m
-${daysLeft !== null ? `- Giorni all'obiettivo: ${daysLeft}` : ""}
+  const prompt = `Sei un coach professionista di ciclismo. Rispondi SOLO con un oggetto JSON valido, senza markdown, senza testo prima o dopo.
 
-ATTIVITÀ RECENTI (dalla più recente):
-${JSON.stringify(acts, null, 2)}
+ATLETA: ${weight}kg, FTP ${ftp}W (${w2wkg(ftp,weight)} W/kg), volume ${totalKm}km/mese, dislivello medio ${avgElev}m/uscita${daysLeft !== null ? `, giorni all'obiettivo: ${daysLeft}` : ""}.
+ULTIME USCITE: ${JSON.stringify(acts)}
+OBIETTIVO (${goalType}): ${goal}
 
-OBIETTIVO (tipo: ${goalType}):
-${goal}
+Rispondi con questo JSON (compila tutti i campi con dati reali, non placeholder):
+{"fitnessLevel":"Intermedio","fitnessScore":65,"weeklyTSSTarget":320,"strengths":["forza 1","forza 2","forza 3"],"weaknesses":["limite 1","limite 2","limite 3"],"readinessForGoal":60,"readinessText":"testo breve","estimatedWeeksToGoal":8,"weeklyPlan":[{"day":"Lunedì","type":"Riposo","title":"Riposo attivo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo o stretching leggero","purpose":"Recupero muscolare"},{"day":"Martedì","type":"Endurance","title":"Fondo Z2","duration":"1h 30m","distance":"40-45km","elevation":"200m","intensity":"Bassa","tss":65,"zones":"Z2 prevalente","description":"Pedalata continua a ${Math.round(ftp*0.65)}-${Math.round(ftp*0.75)}W, cadenza 85-95rpm","purpose":"Costruisce base aerobica"},{"day":"Mercoledì","type":"Recovery","title":"Recovery spin","duration":"45m","distance":"20-25km","elevation":"50m","intensity":"Bassa","tss":25,"zones":"Z1","description":"Pedalata leggerissima sotto ${Math.round(ftp*0.55)}W","purpose":"Recupero attivo"},{"day":"Giovedì","type":"Soglia","title":"Intervalli soglia","duration":"1h 15m","distance":"35-40km","elevation":"150m","intensity":"Alta","tss":85,"zones":"Z4","description":"3x10min a ${Math.round(ftp*0.95)}-${Math.round(ftp*1.05)}W con 5min recupero","purpose":"Migliora FTP e resistenza"},{"day":"Venerdì","type":"Riposo","title":"Riposo completo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo completo o yoga","purpose":"Recupero pre-weekend"},{"day":"Sabato","type":"Lungo","title":"Uscita lunga","duration":"2h 30m","distance":"65-75km","elevation":"600m","intensity":"Media","tss":110,"zones":"Z2-Z3","description":"Lungo fondo con variazioni di ritmo, ultimi 20min a ${Math.round(ftp*0.8)}W","purpose":"Costruisce resistenza specifica per l'obiettivo"},{"day":"Domenica","type":"Endurance","title":"Recupero attivo lungo","duration":"1h 30m","distance":"35-40km","elevation":"200m","intensity":"Bassa","tss":55,"zones":"Z1-Z2","description":"Pedalata facile per smaltire la fatica del sabato","purpose":"Recupero attivo e adattamento"}],"periodization":[{"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"65km"},{"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"75km"},{"week":3,"focus":"Intensità soglia","tssTarget":360,"longRide":"80km"},{"week":4,"focus":"Recupero","tssTarget":200,"longRide":"55km"}],"keyMetrics":[{"metric":"FTP","current":"${ftp}W","target":"target reale in W","tip":"consiglio specifico"},{"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"target reale","tip":"consiglio specifico"},{"metric":"Volume settimanale","current":"${Math.round(totalKm/4)}km","target":"target reale","tip":"consiglio specifico"}],"nutritionPlan":{"preRide":"consiglio reale","duringRide":"consiglio reale","postRide":"consiglio reale","generalTip":"consiglio reale"},"coachMessage":"messaggio motivazionale reale di 2-3 frasi"}`;
 
-Rispondi SOLO con JSON valido, nessun markdown, nessun testo fuori dal JSON:
-{
-  "fitnessLevel": "Principiante|Intermedio|Avanzato|Elite",
-  "fitnessScore": 55,
-  "ftpEstimate": ${ftp},
-  "wkg": "${w2wkg(ftp,weight)}",
-  "powerZones": [
-    {"zone":"Z1 Recupero","min":0,"max":${Math.round(ftp*0.55)},"color":"#6b7280"},
-    {"zone":"Z2 Endurance","min":${Math.round(ftp*0.56)},"max":${Math.round(ftp*0.75)},"color":"#3b82f6"},
-    {"zone":"Z3 Tempo","min":${Math.round(ftp*0.76)},"max":${Math.round(ftp*0.9)},"color":"#10b981"},
-    {"zone":"Z4 Soglia","min":${Math.round(ftp*0.91)},"max":${Math.round(ftp*1.05)},"color":"#f59e0b"},
-    {"zone":"Z5 VO2max","min":${Math.round(ftp*1.06)},"max":${Math.round(ftp*1.2)},"color":"#ef4444"},
-    {"zone":"Z6 Anaerobica","min":${Math.round(ftp*1.21)},"max":999,"color":"#a855f7"}
-  ],
-  "weeklyTSSTarget": 350,
-  "strengths": ["punto1","punto2","punto3"],
-  "weaknesses": ["punto1","punto2","punto3"],
-  "readinessForGoal": 62,
-  "readinessText": "analisi breve 1-2 frasi",
-  "estimatedWeeksToGoal": 8,
-  "weeklyPlan": [
-    {
-      "day": "Lunedì",
-      "type": "Riposo|Recovery|Endurance|Soglia|VO2max|Forza|Lungo",
-      "title": "titolo breve",
-      "duration": "1h 30m",
-      "distance": "40-50 km",
-      "elevation": "200-300m",
-      "intensity": "Bassa|Media|Alta|Massima",
-      "tss": 60,
-      "zones": "Z2 prevalente",
-      "description": "descrizione dettagliata con watt target, cadenza, struttura intervalli se presenti",
-      "purpose": "perché questa sessione ti avvicina all'obiettivo in 1-2 frasi"
-    }
-  ],
-  "periodization": [
-    {"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"70km"},
-    {"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"85km"},
-    {"week":3,"focus":"Introduzione soglia","tssTarget":360,"longRide":"90km"},
-    {"week":4,"focus":"Recupero attivo","tssTarget":200,"longRide":"60km"}
-  ],
-  "keyMetrics": [
-    {"metric":"FTP","current":"${ftp}W","target":"Xw","tip":"come migliorarlo"},
-    {"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"X.X","tip":""},
-    {"metric":"Volume settimanale","current":"Xkm","target":"Xkm","tip":""}
-  ],
-  "nutritionPlan": {
-    "preRide": "cosa mangiare prima",
-    "duringRide": "nutrizione in sella per uscite >2h",
-    "postRide": "recupero post allenamento",
-    "generalTip": "consiglio generale legato all'obiettivo"
-  },
-  "coachMessage": "messaggio motivazionale e tecnico (2-3 frasi, tono diretto da coach)"
-}`;
-
-  const text = await callClaude([{ role: "user", content: prompt }], 4000);
+  const text = await callClaude([{ role: "user", content: prompt }], 5000);
   const clean = text.replace(/```json|```/g, "").trim();
   const jsonMatch = clean.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error("No JSON in response");
-  return JSON.parse(jsonMatch[0]);
+  if (!jsonMatch) throw new Error("Risposta AI non valida");
+  const parsed = JSON.parse(jsonMatch[0]);
+  // Aggiungi le zone calcolate lato client (non dall'AI)
+  parsed.powerZones = zones;
+  parsed.ftpEstimate = ftp;
+  parsed.wkg = w2wkg(ftp, weight);
+  return parsed;
 }
 
 async function chatWithCoach(messages, activities, plan, weight) {
@@ -372,16 +324,20 @@ export default function App() {
   const runAnalysis = async () => {
     if (!goalText.trim()) return;
     setAnalyzing(true);
+    setPlan(null); // reset piano precedente
     try {
       const g = gpxFile ? `${goalText} [GPX: ${gpxFile.name}]` : goalText;
       const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null);
+      // Validazione risposta: deve avere almeno i campi essenziali
+      if (!result.weeklyPlan || !Array.isArray(result.weeklyPlan) || result.weeklyPlan.length === 0) {
+        throw new Error("Piano incompleto — riprova");
+      }
       setPlan(result);
       setActiveDay(0);
       setTab("plan");
     } catch(e) {
-      console.error(e);
-      // Mostra errore inline invece di alert
-      setPlan({ _error: true, _errorMsg: e.message });
+      console.error("Errore analisi AI:", e);
+      setPlan({ _error: true, _errorMsg: e.message || "Errore sconosciuto" });
       setTab("plan");
     }
     setAnalyzing(false);
@@ -401,6 +357,21 @@ export default function App() {
     } catch(e) { setChatMessages(prev => [...prev, { role:"assistant", content:"Errore di connessione. Riprova." }]); }
     setChatLoading(false);
   };
+
+  // ── RECORD PERSONALI ──────────────────────────────────────────────────────
+  const personalRecords = (() => {
+    if (!activities.length) return null;
+    const maxDist = activities.reduce((m,a) => a.distance > m.distance ? a : m, activities[0]);
+    const maxElev = activities.reduce((m,a) => a.total_elevation_gain > m.total_elevation_gain ? a : m, activities[0]);
+    const maxWatts = activities.filter(a => a.average_watts).reduce((m,a) => a.average_watts > (m?.average_watts||0) ? a : m, null);
+    const maxHR = activities.filter(a => a.max_heartrate).reduce((m,a) => a.max_heartrate > (m?.max_heartrate||0) ? a : m, null);
+    return {
+      distance: { value: m2km(maxDist.distance), unit: "km", name: maxDist.name, date: fmtDate(maxDist.start_date) },
+      elevation: { value: Math.round(maxElev.total_elevation_gain), unit: "m↑", name: maxElev.name, date: fmtDate(maxElev.start_date) },
+      watts: maxWatts ? { value: maxWatts.average_watts, unit: "W", name: maxWatts.name, date: fmtDate(maxWatts.start_date) } : null,
+      hr: maxHR ? { value: maxHR.max_heartrate, unit: "bpm", name: maxHR.name, date: fmtDate(maxHR.start_date) } : null,
+    };
+  })();
 
   // ── RAMP TEST ─────────────────────────────────────────────────────────────
   const startRamp = () => {
@@ -912,6 +883,31 @@ export default function App() {
                 </div>
               )}
 
+              {/* Record Personali */}
+              {personalRecords && (
+                <div className="card" style={{ padding:18, marginBottom:16 }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+                    <span style={{ fontSize:16 }}>🏆</span>
+                    <span style={{ fontSize:12, fontWeight:600, color:"#f59e0b" }}>I tuoi Record Personali</span>
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:8 }}>
+                    {[
+                      {label:"Distanza massima", color:"#FC4C02", ...personalRecords.distance},
+                      {label:"Dislivello massimo", color:"#0ea5e9", ...personalRecords.elevation},
+                      ...(personalRecords.watts ? [{label:"Potenza media picco", color:"#f59e0b", ...personalRecords.watts}] : []),
+                      ...(personalRecords.hr ? [{label:"FC massima", color:"#ef4444", ...personalRecords.hr}] : []),
+                    ].map((pr, i) => (
+                      <div key={i} style={{ background:"#0a1120", borderRadius:10, padding:"12px 14px" }}>
+                        <div style={{ fontSize:10, color:"#4b5563", textTransform:"uppercase", letterSpacing:".06em", marginBottom:4 }}>{pr.label}</div>
+                        <div className="cond" style={{ fontSize:28, color:pr.color, lineHeight:1 }}>{pr.value}<span style={{ fontSize:13, marginLeft:2 }}>{pr.unit}</span></div>
+                        <div style={{ fontSize:10, color:"#374151", marginTop:4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{pr.name}</div>
+                        <div style={{ fontSize:10, color:"#1e2d40" }}>{pr.date}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Activities list */}
               <div className="card" style={{ padding:18, marginBottom:16 }}>
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
@@ -1000,7 +996,15 @@ export default function App() {
           {/* ── PLAN TAB ── */}
           {tab === "plan" && (
             <div style={{ maxWidth:960, margin:"0 auto", padding:"20px 16px" }}>
-              {!plan ? (
+              {plan?._error ? (
+                <div style={{ textAlign:"center", padding:"60px 24px" }}>
+                  <div style={{ fontSize:40, marginBottom:12 }}>⚠️</div>
+                  <p className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Errore nella generazione</p>
+                  <p style={{ color:"#4b5563", fontSize:13, marginBottom:8 }}>Il coach ha avuto un problema a elaborare il piano.</p>
+                  <p style={{ color:"#374151", fontSize:11, marginBottom:20, fontFamily:"'JetBrains Mono',monospace" }}>{plan._errorMsg}</p>
+                  <button className="primary-btn" onClick={()=>{ setPlan(null); setTab("dashboard"); }}><IC n="dash" s={15} /> Riprova</button>
+                </div>
+              ) : !plan ? (
                 <div style={{ textAlign:"center", padding:"60px 24px" }}>
                   <div style={{ fontSize:40, marginBottom:12 }}>🎯</div>
                   <p className="cond" style={{ fontSize:28, color:"#fff", marginBottom:8 }}>Nessun piano attivo</p>
