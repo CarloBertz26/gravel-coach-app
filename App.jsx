@@ -380,6 +380,23 @@ export default function App() {
     }, 2000);
   };
 
+  const refreshActivities = async () => {
+    if (!token || refreshing) return;
+    setRefreshing(true);
+    try {
+      const acts = await fetchStravaActivities(token);
+      const rides = token === "MOCK"
+        ? acts
+        : acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
+      setActivities(rides);
+      localStorage.setItem("gc_activities", JSON.stringify(rides));
+      localStorage.setItem("gc_lastRefresh", new Date().toISOString());
+    } catch(e) {
+      console.error("Errore aggiornamento attività:", e);
+    }
+    setRefreshing(false);
+  };
+
   const runAnalysis = async () => {
     if (!goalText.trim()) return;
     setAnalyzing(true);
