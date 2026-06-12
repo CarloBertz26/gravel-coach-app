@@ -87,7 +87,7 @@ async function callClaude(messages, max_tokens = 5000) {
   return d.content.map(c => c.text || "").join("");
 }
 
-async function analyzeWithClaude(activities, goal, goalType, weight, goalDate) {
+async function analyzeWithClaude(activities, goal, goalType, weight, goalDate, updateContext = null) {
   const acts = activities.slice(0, 10).map(a => ({
     date: fmtDate(a.start_date), name: a.name, km: m2km(a.distance),
     duration: s2hhmm(a.moving_time), elev: Math.round(a.total_elevation_gain),
@@ -111,11 +111,19 @@ async function analyzeWithClaude(activities, goal, goalType, weight, goalDate) {
     {zone:"Z6 Anaerobica", min:Math.round(ftp*1.21), max:999, color:"#a855f7"},
   ];
 
+  // Sezione extra se stiamo aggiornando un piano esistente con nuove uscite svolte
+  const updateSection = updateContext ? `
+
+AGGIORNAMENTO PIANO IN CORSO: l'atleta ha già un piano per la settimana corrente. Qui sotto trovi cosa era pianificato e cosa ha effettivamente svolto da allora. Adatta le sessioni RIMANENTI della settimana (mantieni la stessa struttura per i giorni già passati, ma modifica i giorni futuri in base ad adesione, fatica accumulata e obiettivo). Se l'atleta ha saltato sessioni importanti, valuta se recuperarle o sostituirle con qualcosa di equivalente. Se ha fatto più del previsto, aumenta il recupero nei prossimi giorni.
+PIANO PRECEDENTE (settimana tipo): ${JSON.stringify(updateContext.previousWeeklyPlan)}
+NUOVE USCITE SVOLTE DA ALLORA: ${JSON.stringify(updateContext.newActivities)}
+STATO FORMA/FATICA ATTUALE (TSB, valori negativi = stanchezza accumulata): ${updateContext.tsb}` : "";
+
   const prompt = `Sei un coach professionista di ciclismo. Rispondi SOLO con un oggetto JSON valido, senza markdown, senza testo prima o dopo.
 
 ATLETA: ${weight}kg, FTP ${ftp}W (${w2wkg(ftp,weight)} W/kg), volume ${totalKm}km/mese, dislivello medio ${avgElev}m/uscita${daysLeft !== null ? `, giorni all'obiettivo: ${daysLeft}` : ""}.
 ULTIME USCITE: ${JSON.stringify(acts)}
-OBIETTIVO (${goalType}): ${goal}
+OBIETTIVO (${goalType}): ${goal}${updateSection}
 
 Rispondi con questo JSON (compila tutti i campi con dati reali, non placeholder):
 {"fitnessLevel":"Intermedio","fitnessScore":65,"weeklyTSSTarget":320,"strengths":["forza 1","forza 2","forza 3"],"weaknesses":["limite 1","limite 2","limite 3"],"readinessForGoal":60,"readinessText":"testo breve","estimatedWeeksToGoal":8,"weeklyPlan":[{"day":"Lunedì","type":"Riposo","title":"Riposo attivo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo o stretching leggero","purpose":"Recupero muscolare"},{"day":"Martedì","type":"Endurance","title":"Fondo Z2","duration":"1h 30m","distance":"40-45km","elevation":"200m","intensity":"Bassa","tss":65,"zones":"Z2 prevalente","description":"Pedalata continua a ${Math.round(ftp*0.65)}-${Math.round(ftp*0.75)}W, cadenza 85-95rpm","purpose":"Costruisce base aerobica"},{"day":"Mercoledì","type":"Recovery","title":"Recovery spin","duration":"45m","distance":"20-25km","elevation":"50m","intensity":"Bassa","tss":25,"zones":"Z1","description":"Pedalata leggerissima sotto ${Math.round(ftp*0.55)}W","purpose":"Recupero attivo"},{"day":"Giovedì","type":"Soglia","title":"Intervalli soglia","duration":"1h 15m","distance":"35-40km","elevation":"150m","intensity":"Alta","tss":85,"zones":"Z4","description":"3x10min a ${Math.round(ftp*0.95)}-${Math.round(ftp*1.05)}W con 5min recupero","purpose":"Migliora FTP e resistenza"},{"day":"Venerdì","type":"Riposo","title":"Riposo completo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo completo o yoga","purpose":"Recupero pre-weekend"},{"day":"Sabato","type":"Lungo","title":"Uscita lunga","duration":"2h 30m","distance":"65-75km","elevation":"600m","intensity":"Media","tss":110,"zones":"Z2-Z3","description":"Lungo fondo con variazioni di ritmo, ultimi 20min a ${Math.round(ftp*0.8)}W","purpose":"Costruisce resistenza specifica per l'obiettivo"},{"day":"Domenica","type":"Endurance","title":"Recupero attivo lungo","duration":"1h 30m","distance":"35-40km","elevation":"200m","intensity":"Bassa","tss":55,"zones":"Z1-Z2","description":"Pedalata facile per smaltire la fatica del sabato","purpose":"Recupero attivo e adattamento"}],"periodization":[{"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"65km"},{"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"75km"},{"week":3,"focus":"Intensità soglia","tssTarget":360,"longRide":"80km"},{"week":4,"focus":"Recupero","tssTarget":200,"longRide":"55km"}],"keyMetrics":[{"metric":"FTP","current":"${ftp}W","target":"target reale in W","tip":"consiglio specifico"},{"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"target reale","tip":"consiglio specifico"},{"metric":"Volume settimanale","current":"${Math.round(totalKm/4)}km","target":"target reale","tip":"consiglio specifico"}],"nutritionPlan":{"preRide":"consiglio reale","duringRide":"consiglio reale","postRide":"consiglio reale","generalTip":"consiglio reale"},"coachMessage":"messaggio motivazionale reale di 2-3 frasi"}`;
@@ -302,6 +310,8 @@ export default function App() {
   const [nutritionRideKm, setNutritionRideKm] = useState(50);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [newActivitiesSinceLastPlan, setNewActivitiesSinceLastPlan] = useState([]);
+  const [updatingPlan, setUpdatingPlan] = useState(false);
   const fileRef = useRef();
   const chatEndRef = useRef();
 
@@ -423,10 +433,15 @@ export default function App() {
         ? acts
         : acts.filter(a => a.type === "Ride" || a.sport_type?.includes("Ride"));
       setActivities(rides);
-      localStorage.setItem("gc_activities", JSON.stringify(rides.slice(0, 20)));
+      try { localStorage.setItem("gc_activities", JSON.stringify(rides.slice(0, 20))); } catch(e) { console.warn("localStorage:", e); }
       const ts = new Date().toISOString();
       localStorage.setItem("gc_lastRefresh", ts);
       setLastRefresh(ts);
+      // Rileva nuove uscite svolte dopo la generazione del piano attuale
+      if (plan && !plan._error && plan._lastActivityDate) {
+        const newOnes = rides.filter(a => new Date(a.start_date).getTime() > new Date(plan._lastActivityDate).getTime());
+        setNewActivitiesSinceLastPlan(newOnes);
+      }
     } catch(e) {
       console.error("Errore aggiornamento attività:", e);
     }
@@ -444,8 +459,11 @@ export default function App() {
       if (!result.weeklyPlan || !Array.isArray(result.weeklyPlan) || result.weeklyPlan.length === 0) {
         throw new Error("Piano incompleto — riprova");
       }
+      result._generatedAt = new Date().toISOString();
+      result._lastActivityDate = activities.length ? activities[0].start_date : null;
       setPlan(result);
       setActiveDay(0);
+      setNewActivitiesSinceLastPlan([]);
       setTab("plan");
     } catch(e) {
       console.error("Errore analisi AI:", e);
@@ -453,6 +471,35 @@ export default function App() {
       setTab("plan");
     }
     setAnalyzing(false);
+  };
+
+  const updatePlan = async () => {
+    if (!plan || plan._error || updatingPlan) return;
+    setUpdatingPlan(true);
+    try {
+      const g = gpxFile ? `${goalText} [GPX: ${gpxFile.name}]` : goalText;
+      const updateContext = {
+        previousWeeklyPlan: plan.weeklyPlan.map(p => ({ day:p.day, type:p.type, title:p.title, tss:p.tss })),
+        newActivities: newActivitiesSinceLastPlan.map(a => ({
+          date: fmtDate(a.start_date), name:a.name, km:m2km(a.distance),
+          watts:a.average_watts||null, tss: calcTSS(a.moving_time, a.average_watts, ftp),
+        })),
+        tsb: currentTSB,
+      };
+      const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null, updateContext);
+      if (!result.weeklyPlan || !Array.isArray(result.weeklyPlan) || result.weeklyPlan.length === 0) {
+        throw new Error("Piano incompleto — riprova");
+      }
+      result._generatedAt = new Date().toISOString();
+      result._lastActivityDate = activities.length ? activities[0].start_date : null;
+      setPlan(result);
+      setActiveDay(0);
+      setNewActivitiesSinceLastPlan([]);
+    } catch(e) {
+      console.error("Errore aggiornamento piano:", e);
+      alert("Errore nell'aggiornamento del piano: " + e.message);
+    }
+    setUpdatingPlan(false);
   };
 
   const sendChat = async () => {
@@ -1158,6 +1205,26 @@ export default function App() {
                   <span style={{ fontSize:10, color:"#374151", fontFamily:"'JetBrains Mono',monospace" }}>
                     Aggiornato: {new Date(lastRefresh).toLocaleString("it-IT",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}
                   </span>
+                </div>
+              )}
+
+              {/* ── BANNER PIANO AGGIORNABILE ── */}
+              {newActivitiesSinceLastPlan.length > 0 && plan && !plan._error && (
+                <div className="card" style={{ padding:16, marginBottom:16, border:"1px solid rgba(34,197,94,.25)", background:"rgba(34,197,94,.05)" }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                      <span style={{ fontSize:22 }}>🔄</span>
+                      <div>
+                        <div style={{ fontWeight:600, color:"#22c55e", fontSize:13 }}>
+                          {newActivitiesSinceLastPlan.length === 1 ? "Nuova uscita rilevata" : `${newActivitiesSinceLastPlan.length} nuove uscite rilevate`}
+                        </div>
+                        <div style={{ fontSize:11, color:"#94a3b8" }}>Il coach può adattare le sessioni rimanenti della settimana in base a quello che hai fatto.</div>
+                      </div>
+                    </div>
+                    <button onClick={updatePlan} disabled={updatingPlan} className="primary-btn" style={{ fontSize:12, padding:"8px 16px", opacity:updatingPlan?0.6:1 }}>
+                      {updatingPlan ? <><IC n="spin" s={13} /> Aggiornamento...</> : <>⚡ Aggiorna piano</>}
+                    </button>
+                  </div>
                 </div>
               )}
 
