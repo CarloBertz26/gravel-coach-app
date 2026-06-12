@@ -101,6 +101,23 @@ async function analyzeWithClaude(activities, goal, goalType, weight, goalDate, u
   const avgElev = Math.round(activities.reduce((s,a)=>s+a.total_elevation_gain,0)/activities.length);
   const daysLeft = goalDate ? daysUntil(goalDate) : null;
 
+  // ── VALORI DETERMINISTICI — calcolati con formule fisse, NON dall'AI ──────
+  // Garantisce che a parità di dati il coach dia sempre la stessa valutazione.
+  const wkgNum = parseFloat(w2wkg(ftp, weight));
+  let fitnessLevel;
+  if (wkgNum < 2.5) fitnessLevel = "Principiante";
+  else if (wkgNum < 3.5) fitnessLevel = "Intermedio";
+  else if (wkgNum < 4.5) fitnessLevel = "Avanzato";
+  else fitnessLevel = "Elite";
+  const fitnessScore = Math.max(10, Math.min(100, Math.round((wkgNum/5)*100)));
+
+  // TSS settimanale target: media ultime 4 settimane +8% (progressione standard)
+  const fourWeeksAgo = Date.now() - 28*86400000;
+  const recentActs = activities.filter(a => new Date(a.start_date).getTime() > fourWeeksAgo);
+  const recentTSS = recentActs.reduce((s,a)=>s+calcTSS(a.moving_time, a.average_watts, ftp), 0);
+  const avgWeeklyTSS = recentActs.length ? Math.round(recentTSS / 4) : 250;
+  const weeklyTSSTarget = Math.round(avgWeeklyTSS * 1.08);
+
   // Zone di potenza calcolate lato client — non chiediamo all'AI di calcolarle
   const zones = [
     {zone:"Z1 Recupero", min:0, max:Math.round(ftp*0.55), color:"#6b7280"},
@@ -122,18 +139,22 @@ STATO FORMA/FATICA ATTUALE (TSB, valori negativi = stanchezza accumulata): ${upd
   const prompt = `Sei un coach professionista di ciclismo. Rispondi SOLO con un oggetto JSON valido, senza markdown, senza testo prima o dopo.
 
 ATLETA: ${weight}kg, FTP ${ftp}W (${w2wkg(ftp,weight)} W/kg), volume ${totalKm}km/mese, dislivello medio ${avgElev}m/uscita${daysLeft !== null ? `, giorni all'obiettivo: ${daysLeft}` : ""}.
+LIVELLO E TARGET GIA' CALCOLATI (usali come riferimento per coerenza, non contraddirli nel testo): livello = ${fitnessLevel}, fitness score = ${fitnessScore}/100, target TSS settimanale = ${weeklyTSSTarget}.
 ULTIME USCITE: ${JSON.stringify(acts)}
 OBIETTIVO (${goalType}): ${goal}${updateSection}
 
-Rispondi con questo JSON (compila tutti i campi con dati reali, non placeholder):
-{"fitnessLevel":"Intermedio","fitnessScore":65,"weeklyTSSTarget":320,"strengths":["forza 1","forza 2","forza 3"],"weaknesses":["limite 1","limite 2","limite 3"],"readinessForGoal":60,"readinessText":"testo breve","estimatedWeeksToGoal":8,"weeklyPlan":[{"day":"Lunedì","type":"Riposo","title":"Riposo attivo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo o stretching leggero","purpose":"Recupero muscolare"},{"day":"Martedì","type":"Endurance","title":"Fondo Z2","duration":"1h 30m","distance":"40-45km","elevation":"200m","intensity":"Bassa","tss":65,"zones":"Z2 prevalente","description":"Pedalata continua a ${Math.round(ftp*0.65)}-${Math.round(ftp*0.75)}W, cadenza 85-95rpm","purpose":"Costruisce base aerobica"},{"day":"Mercoledì","type":"Recovery","title":"Recovery spin","duration":"45m","distance":"20-25km","elevation":"50m","intensity":"Bassa","tss":25,"zones":"Z1","description":"Pedalata leggerissima sotto ${Math.round(ftp*0.55)}W","purpose":"Recupero attivo"},{"day":"Giovedì","type":"Soglia","title":"Intervalli soglia","duration":"1h 15m","distance":"35-40km","elevation":"150m","intensity":"Alta","tss":85,"zones":"Z4","description":"3x10min a ${Math.round(ftp*0.95)}-${Math.round(ftp*1.05)}W con 5min recupero","purpose":"Migliora FTP e resistenza"},{"day":"Venerdì","type":"Riposo","title":"Riposo completo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo completo o yoga","purpose":"Recupero pre-weekend"},{"day":"Sabato","type":"Lungo","title":"Uscita lunga","duration":"2h 30m","distance":"65-75km","elevation":"600m","intensity":"Media","tss":110,"zones":"Z2-Z3","description":"Lungo fondo con variazioni di ritmo, ultimi 20min a ${Math.round(ftp*0.8)}W","purpose":"Costruisce resistenza specifica per l'obiettivo"},{"day":"Domenica","type":"Endurance","title":"Recupero attivo lungo","duration":"1h 30m","distance":"35-40km","elevation":"200m","intensity":"Bassa","tss":55,"zones":"Z1-Z2","description":"Pedalata facile per smaltire la fatica del sabato","purpose":"Recupero attivo e adattamento"}],"periodization":[{"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"65km"},{"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"75km"},{"week":3,"focus":"Intensità soglia","tssTarget":360,"longRide":"80km"},{"week":4,"focus":"Recupero","tssTarget":200,"longRide":"55km"}],"keyMetrics":[{"metric":"FTP","current":"${ftp}W","target":"target reale in W","tip":"consiglio specifico"},{"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"target reale","tip":"consiglio specifico"},{"metric":"Volume settimanale","current":"${Math.round(totalKm/4)}km","target":"target reale","tip":"consiglio specifico"}],"nutritionPlan":{"preRide":"consiglio reale","duringRide":"consiglio reale","postRide":"consiglio reale","generalTip":"consiglio reale"},"coachMessage":"messaggio motivazionale reale di 2-3 frasi"}`;
+Rispondi con questo JSON (compila tutti i campi con dati reali, non placeholder). I campi fitnessLevel, fitnessScore e weeklyTSSTarget devono corrispondere EXATTAMENTE ai valori già calcolati sopra:
+{"fitnessLevel":"${fitnessLevel}","fitnessScore":${fitnessScore},"weeklyTSSTarget":${weeklyTSSTarget},"strengths":["forza 1","forza 2","forza 3"],"weaknesses":["limite 1","limite 2","limite 3"],"readinessForGoal":60,"readinessText":"testo breve","estimatedWeeksToGoal":8,"weeklyPlan":[{"day":"Lunedì","type":"Riposo","title":"Riposo attivo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo o stretching leggero","purpose":"Recupero muscolare"},{"day":"Martedì","type":"Endurance","title":"Fondo Z2","duration":"1h 30m","distance":"40-45km","elevation":"200m","intensity":"Bassa","tss":65,"zones":"Z2 prevalente","description":"Pedalata continua a ${Math.round(ftp*0.65)}-${Math.round(ftp*0.75)}W, cadenza 85-95rpm","purpose":"Costruisce base aerobica"},{"day":"Mercoledì","type":"Recovery","title":"Recovery spin","duration":"45m","distance":"20-25km","elevation":"50m","intensity":"Bassa","tss":25,"zones":"Z1","description":"Pedalata leggerissima sotto ${Math.round(ftp*0.55)}W","purpose":"Recupero attivo"},{"day":"Giovedì","type":"Soglia","title":"Intervalli soglia","duration":"1h 15m","distance":"35-40km","elevation":"150m","intensity":"Alta","tss":85,"zones":"Z4","description":"3x10min a ${Math.round(ftp*0.95)}-${Math.round(ftp*1.05)}W con 5min recupero","purpose":"Migliora FTP e resistenza"},{"day":"Venerdì","type":"Riposo","title":"Riposo completo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo completo o yoga","purpose":"Recupero pre-weekend"},{"day":"Sabato","type":"Lungo","title":"Uscita lunga","duration":"2h 30m","distance":"65-75km","elevation":"600m","intensity":"Media","tss":110,"zones":"Z2-Z3","description":"Lungo fondo con variazioni di ritmo, ultimi 20min a ${Math.round(ftp*0.8)}W","purpose":"Costruisce resistenza specifica per l'obiettivo"},{"day":"Domenica","type":"Endurance","title":"Recupero attivo lungo","duration":"1h 30m","distance":"35-40km","elevation":"200m","intensity":"Bassa","tss":55,"zones":"Z1-Z2","description":"Pedalata facile per smaltire la fatica del sabato","purpose":"Recupero attivo e adattamento"}],"periodization":[{"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"65km"},{"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"75km"},{"week":3,"focus":"Intensità soglia","tssTarget":360,"longRide":"80km"},{"week":4,"focus":"Recupero","tssTarget":200,"longRide":"55km"}],"keyMetrics":[{"metric":"FTP","current":"${ftp}W","target":"target reale in W","tip":"consiglio specifico"},{"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"target reale","tip":"consiglio specifico"},{"metric":"Volume settimanale","current":"${Math.round(totalKm/4)}km","target":"target reale","tip":"consiglio specifico"}],"nutritionPlan":{"preRide":"consiglio reale","duringRide":"consiglio reale","postRide":"consiglio reale","generalTip":"consiglio reale"},"coachMessage":"messaggio motivazionale reale di 2-3 frasi"}`;
 
   const text = await callClaude([{ role: "user", content: prompt }], 5000);
   const clean = text.replace(/```json|```/g, "").trim();
   const jsonMatch = clean.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("Risposta AI non valida");
   const parsed = JSON.parse(jsonMatch[0]);
-  // Aggiungi le zone calcolate lato client (non dall'AI)
+  // Forza i valori deterministici — sovrascrive eventuali variazioni dell'AI
+  parsed.fitnessLevel = fitnessLevel;
+  parsed.fitnessScore = fitnessScore;
+  parsed.weeklyTSSTarget = weeklyTSSTarget;
   parsed.powerZones = zones;
   parsed.ftpEstimate = ftp;
   parsed.wkg = w2wkg(ftp, weight);
