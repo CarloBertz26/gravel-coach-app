@@ -72,9 +72,18 @@ async function callClaude(messages, max_tokens = 5000) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, max_tokens }),
   });
-  if (!r.ok) throw new Error("Errore connessione al coach AI");
-  const d = await r.json();
-  if (d.error) throw new Error(d.error);
+  // Leggi sempre il body per mostrare l'errore reale, anche se !r.ok
+  let d;
+  try {
+    d = await r.json();
+  } catch {
+    throw new Error(`Errore server (${r.status})`);
+  }
+  if (d.error) {
+    const msg = typeof d.error === "string" ? d.error : (d.error.message || JSON.stringify(d.error));
+    throw new Error(msg);
+  }
+  if (!r.ok) throw new Error(`Errore server (${r.status})`);
   return d.content.map(c => c.text || "").join("");
 }
 
