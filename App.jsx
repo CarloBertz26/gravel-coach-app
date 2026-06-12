@@ -25,6 +25,80 @@ const calcFTP = (activities, weight) => {
 };
 const calcTSS = (duration_s, avgWatts, ftp) => { if (!avgWatts || !ftp) return 0; const IF = avgWatts / ftp; return Math.round((duration_s * avgWatts * IF) / (ftp * 3600) * 100); };
 
+// ─── GPX PARSING ────────────────────────────────────────────────────────────
+// Distanza haversine tra due punti lat/lon in metri
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Estrae statistiche reali da un file GPX: distanza totale, dislivello, altimetria, salite principali
+async function parseGPXFile(file) {
+  const text = await file.text();
+  const xml = new DOMParser().parseFromString(text, "application/xml");
+  const trkpts = Array.from(xml.querySelectorAll("trkpt, rtept"));
+  if (!trkpts.length) throw new Error("Nessun punto traccia trovato nel GPX");
+
+  const points = trkpts.map(pt => ({
+    lat: parseFloat(pt.getAttribute("lat")),
+    lon: parseFloat(pt.getAttribute("lon")),
+    ele: parseFloat(pt.querySelector("ele")?.textContent ?? "0"),
+  })).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
+
+  let totalDistance = 0, elevGain = 0, elevLoss = 0;
+  let minEle = points[0]?.ele ?? 0, maxEle = points[0]?.ele ?? 0;
+  const climbs = []; // segmenti di salita significativi
+  let currentClimb = null;
+
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i-1], cur = points[i];
+    const dist = haversine(prev.lat, prev.lon, cur.lat, cur.lon);
+    totalDistance += dist;
+    const eleDiff = cur.ele - prev.ele;
+    if (eleDiff > 0) elevGain += eleDiff;
+    else elevLoss += Math.abs(eleDiff);
+    if (cur.ele > maxEle) maxEle = cur.ele;
+    if (cur.ele < minEle) minEle = cur.ele;
+
+    // Rileva salite: pendenza positiva sostenuta
+    const grade = dist > 0 ? (eleDiff / dist) * 100 : 0;
+    if (grade > 2) {
+      if (!currentClimb) currentClimb = { startDist: totalDistance - dist, elevGain: 0, distance: 0 };
+      currentClimb.elevGain += Math.max(0, eleDiff);
+      currentClimb.distance += dist;
+    } else {
+      if (currentClimb && currentClimb.distance > 500 && currentClimb.elevGain > 30) {
+        climbs.push({ ...currentClimb, avgGrade: (currentClimb.elevGain / currentClimb.distance * 100).toFixed(1) });
+      }
+      currentClimb = null;
+    }
+  }
+  if (currentClimb && currentClimb.distance > 500 && currentClimb.elevGain > 30) {
+    climbs.push({ ...currentClimb, avgGrade: (currentClimb.elevGain / currentClimb.distance * 100).toFixed(1) });
+  }
+
+  // Ordina le salite per dislivello e prendi le 3 più significative
+  const topClimbs = climbs.sort((a,b) => b.elevGain - a.elevGain).slice(0,3).map(c => ({
+    distanceKm: (c.distance/1000).toFixed(1),
+    elevGain: Math.round(c.elevGain),
+    avgGrade: c.avgGrade,
+    startKm: (c.startDist/1000).toFixed(1),
+  }));
+
+  return {
+    distanceKm: (totalDistance/1000).toFixed(1),
+    elevGain: Math.round(elevGain),
+    elevLoss: Math.round(elevLoss),
+    minEle: Math.round(minEle),
+    maxEle: Math.round(maxEle),
+    numPoints: points.length,
+    topClimbs,
+  };
+}
+
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
 function getMockActivities() {
   const now = Date.now(), day = 86400000;
@@ -87,7 +161,7 @@ async function callClaude(messages, max_tokens = 5000) {
   return d.content.map(c => c.text || "").join("");
 }
 
-async function analyzeWithClaude(activities, goal, goalType, weight, goalDate, updateContext = null) {
+async function analyzeWithClaude(activities, goal, goalType, weight, goalDate, updateContext = null, routeData = null) {
   const acts = activities.slice(0, 10).map(a => ({
     date: fmtDate(a.start_date), name: a.name, km: m2km(a.distance),
     duration: s2hhmm(a.moving_time), elev: Math.round(a.total_elevation_gain),
@@ -129,6 +203,17 @@ async function analyzeWithClaude(activities, goal, goalType, weight, goalDate, u
   ];
 
   // Sezione extra se stiamo aggiornando un piano esistente con nuove uscite svolte
+  // Sezione con dati reali del percorso GPX, se caricato e analizzato
+  const routeSection = routeData ? `
+
+PERCORSO REALE ANALIZZATO DA FILE GPX (usa questi dati esatti, non stimare):
+- Distanza totale: ${routeData.distanceKm}km
+- Dislivello positivo totale: ${routeData.elevGain}m
+- Dislivello negativo totale: ${routeData.elevLoss}m
+- Altitudine minima: ${routeData.minEle}m, massima: ${routeData.maxEle}m
+${routeData.topClimbs.length > 0 ? `- Salite principali: ${routeData.topClimbs.map(c => `salita di ${c.distanceKm}km al km ${c.startKm} con ${c.elevGain}m di dislivello (pendenza media ${c.avgGrade}%)`).join("; ")}` : "- Nessuna salita significativa rilevata (percorso pianeggiante)"}
+Usa questi dati per stimare il tempo di percorrenza realistico, l'intensità richiesta e per dare consigli specifici su come affrontare le salite indicate (gestione sforzo, cambio rapporti, pacing).` : "";
+
   const updateSection = updateContext ? `
 
 AGGIORNAMENTO PIANO IN CORSO: l'atleta ha già un piano per la settimana corrente. Qui sotto trovi cosa era pianificato e cosa ha effettivamente svolto da allora. Adatta le sessioni RIMANENTI della settimana (mantieni la stessa struttura per i giorni già passati, ma modifica i giorni futuri in base ad adesione, fatica accumulata e obiettivo). Se l'atleta ha saltato sessioni importanti, valuta se recuperarle o sostituirle con qualcosa di equivalente. Se ha fatto più del previsto, aumenta il recupero nei prossimi giorni.
@@ -141,7 +226,7 @@ STATO FORMA/FATICA ATTUALE (TSB, valori negativi = stanchezza accumulata): ${upd
 ATLETA: ${weight}kg, FTP ${ftp}W (${w2wkg(ftp,weight)} W/kg), volume ${totalKm}km/mese, dislivello medio ${avgElev}m/uscita${daysLeft !== null ? `, giorni all'obiettivo: ${daysLeft}` : ""}.
 LIVELLO E TARGET GIA' CALCOLATI (usali come riferimento per coerenza, non contraddirli nel testo): livello = ${fitnessLevel}, fitness score = ${fitnessScore}/100, target TSS settimanale = ${weeklyTSSTarget}.
 ULTIME USCITE: ${JSON.stringify(acts)}
-OBIETTIVO (${goalType}): ${goal}${updateSection}
+OBIETTIVO (${goalType}): ${goal}${routeSection}${updateSection}
 
 Rispondi con questo JSON (compila tutti i campi con dati reali, non placeholder). I campi fitnessLevel, fitnessScore e weeklyTSSTarget devono corrispondere EXATTAMENTE ai valori già calcolati sopra:
 {"fitnessLevel":"${fitnessLevel}","fitnessScore":${fitnessScore},"weeklyTSSTarget":${weeklyTSSTarget},"strengths":["forza 1","forza 2","forza 3"],"weaknesses":["limite 1","limite 2","limite 3"],"readinessForGoal":60,"readinessText":"testo breve","estimatedWeeksToGoal":8,"weeklyPlan":[{"day":"Lunedì","type":"Riposo","title":"Riposo attivo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo o stretching leggero","purpose":"Recupero muscolare"},{"day":"Martedì","type":"Endurance","title":"Fondo Z2","duration":"1h 30m","distance":"40-45km","elevation":"200m","intensity":"Bassa","tss":65,"zones":"Z2 prevalente","description":"Pedalata continua a ${Math.round(ftp*0.65)}-${Math.round(ftp*0.75)}W, cadenza 85-95rpm","purpose":"Costruisce base aerobica"},{"day":"Mercoledì","type":"Recovery","title":"Recovery spin","duration":"45m","distance":"20-25km","elevation":"50m","intensity":"Bassa","tss":25,"zones":"Z1","description":"Pedalata leggerissima sotto ${Math.round(ftp*0.55)}W","purpose":"Recupero attivo"},{"day":"Giovedì","type":"Soglia","title":"Intervalli soglia","duration":"1h 15m","distance":"35-40km","elevation":"150m","intensity":"Alta","tss":85,"zones":"Z4","description":"3x10min a ${Math.round(ftp*0.95)}-${Math.round(ftp*1.05)}W con 5min recupero","purpose":"Migliora FTP e resistenza"},{"day":"Venerdì","type":"Riposo","title":"Riposo completo","duration":"—","distance":"—","elevation":"—","intensity":"Bassa","tss":0,"zones":"—","description":"Riposo completo o yoga","purpose":"Recupero pre-weekend"},{"day":"Sabato","type":"Lungo","title":"Uscita lunga","duration":"2h 30m","distance":"65-75km","elevation":"600m","intensity":"Media","tss":110,"zones":"Z2-Z3","description":"Lungo fondo con variazioni di ritmo, ultimi 20min a ${Math.round(ftp*0.8)}W","purpose":"Costruisce resistenza specifica per l'obiettivo"},{"day":"Domenica","type":"Endurance","title":"Recupero attivo lungo","duration":"1h 30m","distance":"35-40km","elevation":"200m","intensity":"Bassa","tss":55,"zones":"Z1-Z2","description":"Pedalata facile per smaltire la fatica del sabato","purpose":"Recupero attivo e adattamento"}],"periodization":[{"week":1,"focus":"Base aerobica","tssTarget":280,"longRide":"65km"},{"week":2,"focus":"Volume progressivo","tssTarget":320,"longRide":"75km"},{"week":3,"focus":"Intensità soglia","tssTarget":360,"longRide":"80km"},{"week":4,"focus":"Recupero","tssTarget":200,"longRide":"55km"}],"keyMetrics":[{"metric":"FTP","current":"${ftp}W","target":"target reale in W","tip":"consiglio specifico"},{"metric":"W/kg","current":"${w2wkg(ftp,weight)}","target":"target reale","tip":"consiglio specifico"},{"metric":"Volume settimanale","current":"${Math.round(totalKm/4)}km","target":"target reale","tip":"consiglio specifico"}],"nutritionPlan":{"preRide":"consiglio reale","duringRide":"consiglio reale","postRide":"consiglio reale","generalTip":"consiglio reale"},"coachMessage":"messaggio motivazionale reale di 2-3 frasi"}`;
@@ -309,6 +394,9 @@ export default function App() {
   const [goalText, setGoalText] = useState("");
   const [goalDate, setGoalDate] = useState("");
   const [gpxFile, setGpxFile] = useState(null);
+  const [gpxData, setGpxData] = useState(null);
+  const [gpxParsing, setGpxParsing] = useState(false);
+  const [gpxError, setGpxError] = useState(null);
   const [notes, setNotes] = useState({});
   const [chatMessages, setChatMessages] = useState([
     { role:"assistant", content:"Ciao! Sono il tuo coach. Analizza le tue attività e imposta un obiettivo per iniziare. Poi posso rispondere a qualsiasi domanda sul tuo allenamento." }
@@ -494,8 +582,8 @@ export default function App() {
     setAnalyzing(true);
     setPlan(null); // reset piano precedente
     try {
-      const g = gpxFile ? `${goalText} [GPX: ${gpxFile.name}]` : goalText;
-      const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null);
+      const g = gpxFile ? `${goalText} [Percorso GPX: ${gpxFile.name}]` : goalText;
+      const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null, null, gpxData);
       // Validazione risposta: deve avere almeno i campi essenziali
       if (!result.weeklyPlan || !Array.isArray(result.weeklyPlan) || result.weeklyPlan.length === 0) {
         throw new Error("Piano incompleto — riprova");
@@ -518,7 +606,7 @@ export default function App() {
     if (!plan || plan._error || updatingPlan) return;
     setUpdatingPlan(true);
     try {
-      const g = gpxFile ? `${goalText} [GPX: ${gpxFile.name}]` : goalText;
+      const g = gpxFile ? `${goalText} [Percorso GPX: ${gpxFile.name}]` : goalText;
       const updateContext = {
         previousWeeklyPlan: plan.weeklyPlan.map(p => ({ day:p.day, type:p.type, title:p.title, tss:p.tss })),
         newActivities: newActivitiesSinceLastPlan.map(a => ({
@@ -527,7 +615,7 @@ export default function App() {
         })),
         tsb: currentTSB,
       };
-      const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null, updateContext);
+      const result = await analyzeWithClaude(activities, g, goalType, weight, goalDate || null, updateContext, gpxData);
       if (!result.weeklyPlan || !Array.isArray(result.weeklyPlan) || result.weeklyPlan.length === 0) {
         throw new Error("Piano incompleto — riprova");
       }
@@ -1704,16 +1792,73 @@ export default function App() {
                     </div>
                     <div>
                       <label style={{ fontSize:11, color:"#4b5563", display:"block", marginBottom:4 }}>GPX percorso</label>
-                      <div onClick={()=>fileRef.current?.click()} style={{ background:"#111827", border:"1px dashed rgba(255,255,255,.09)", borderRadius:9, padding:"9px 12px", cursor:"pointer", display:"flex", alignItems:"center", gap:6, color:gpxFile?"#22c55e":"#4b5563", fontSize:12 }}>
-                        <IC n="upload" s={13} />{gpxFile?gpxFile.name:"Carica GPX"}
+                      <div onClick={()=>fileRef.current?.click()} style={{ background:"#111827", border:`1px dashed ${gpxError?"rgba(239,68,68,.4)":"rgba(255,255,255,.09)"}`, borderRadius:9, padding:"9px 12px", cursor:"pointer", display:"flex", alignItems:"center", gap:6, color:gpxError?"#ef4444":gpxFile?"#22c55e":"#4b5563", fontSize:12 }}>
+                        {gpxParsing ? <IC n="spin" s={13} /> : <IC n="upload" s={13} />}
+                        {gpxParsing ? "Analisi percorso..." : gpxError ? "Errore GPX — riprova" : gpxFile ? gpxFile.name : "Carica GPX"}
                       </div>
-                      <input ref={fileRef} type="file" accept=".gpx" style={{display:"none"}} onChange={e=>setGpxFile(e.target.files[0])} />
+                      <input ref={fileRef} type="file" accept=".gpx" style={{display:"none"}} onChange={async e=>{
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        setGpxFile(file);
+                        setGpxData(null);
+                        setGpxError(null);
+                        setGpxParsing(true);
+                        try {
+                          const data = await parseGPXFile(file);
+                          setGpxData(data);
+                        } catch(err) {
+                          console.error("Errore parsing GPX:", err);
+                          setGpxError(err.message || "File GPX non valido");
+                        }
+                        setGpxParsing(false);
+                      }} />
                     </div>
                   </div>
                   {goalDate && (
                     <div style={{ background:"rgba(14,165,233,.08)", border:"1px solid rgba(14,165,233,.15)", borderRadius:8, padding:"8px 12px", display:"flex", alignItems:"center", gap:8 }}>
                       <IC n="clock" s={13} />
                       <span style={{ fontSize:12, color:"#38bdf8" }}><strong>{daysUntil(goalDate)} giorni</strong> all'obiettivo</span>
+                    </div>
+                  )}
+
+                  {/* Riepilogo percorso GPX analizzato */}
+                  {gpxData && (
+                    <div style={{ background:"rgba(34,197,94,.06)", border:"1px solid rgba(34,197,94,.18)", borderRadius:10, padding:"12px 14px" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:8 }}>
+                        <span style={{ fontSize:14 }}>🗺️</span>
+                        <span style={{ fontSize:11, fontWeight:700, color:"#22c55e", textTransform:"uppercase", letterSpacing:".06em" }}>Percorso analizzato — il coach userà questi dati</span>
+                      </div>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:gpxData.topClimbs.length?10:0 }}>
+                        {[
+                          { label:"Distanza", value:`${gpxData.distanceKm}`, unit:"km", color:"#FC4C02" },
+                          { label:"Dislivello +", value:`${gpxData.elevGain}`, unit:"m", color:"#0ea5e9" },
+                          { label:"Altitudine max", value:`${gpxData.maxEle}`, unit:"m", color:"#a855f7" },
+                          { label:"Altitudine min", value:`${gpxData.minEle}`, unit:"m", color:"#4b5563" },
+                        ].map(s => (
+                          <div key={s.label} style={{ textAlign:"center" }}>
+                            <div className="cond" style={{ fontSize:20, color:s.color, lineHeight:1 }}>{s.value}<span style={{fontSize:10}}>{s.unit}</span></div>
+                            <div style={{ fontSize:9, color:"#4b5563", marginTop:2 }}>{s.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {gpxData.topClimbs.length > 0 && (
+                        <div>
+                          <div style={{ fontSize:10, color:"#4b5563", marginBottom:5, textTransform:"uppercase", letterSpacing:".06em" }}>Salite principali</div>
+                          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                            {gpxData.topClimbs.map((c,i) => (
+                              <div key={i} style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:"#94a3b8" }}>
+                                <span>Km {c.startKm} — salita di {c.distanceKm}km</span>
+                                <span className="mono" style={{ color:"#f59e0b" }}>+{c.elevGain}m · {c.avgGrade}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {gpxError && (
+                    <div style={{ background:"rgba(239,68,68,.06)", border:"1px solid rgba(239,68,68,.18)", borderRadius:8, padding:"8px 12px", fontSize:11, color:"#ef4444" }}>
+                      ⚠️ {gpxError}
                     </div>
                   )}
                   <button className="primary-btn" onClick={runAnalysis} disabled={!goalText.trim()} style={{ justifyContent:"center", fontSize:14 }}>
