@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const STRAVA_CLIENT_ID = "253711";
@@ -608,6 +608,90 @@ export default function App() {
 
   // Periodization chart
   const periodData = plan?.periodization?.map(w => ({ week:`S${w.week}`, tss:w.tssTarget, focus:w.focus })) || [];
+
+  // ── TRANCHE 3: PERFORMANCE MANAGEMENT CHART (CTL/ATL/TSB) ────────────────
+  const pmcData = (() => {
+    if (!activities.length) return [];
+    // TSS giornaliero da tutte le attività
+    const dailyTSS = {};
+    activities.forEach(a => {
+      const day = new Date(a.start_date).toISOString().slice(0,10);
+      const tss = calcTSS(a.moving_time, a.average_watts, ftp);
+      dailyTSS[day] = (dailyTSS[day] || 0) + tss;
+    });
+    // Range: dal giorno più vecchio (max 56gg) ad oggi
+    const oldestDate = activities.reduce((min,a) => {
+      const t = new Date(a.start_date).getTime();
+      return t < min ? t : min;
+    }, Date.now());
+    const daysSpan = Math.min(56, Math.max(28, Math.ceil((Date.now() - oldestDate) / 86400000) + 7));
+    const series = [];
+    let ctl = 0, atl = 0;
+    for (let i = daysSpan; i >= 0; i--) {
+      const d = new Date(Date.now() - i*86400000);
+      const key = d.toISOString().slice(0,10);
+      const tss = dailyTSS[key] || 0;
+      ctl = ctl + (tss - ctl) * (1/42);
+      atl = atl + (tss - atl) * (1/7);
+      const tsb = ctl - atl;
+      series.push({
+        date: d.toLocaleDateString("it-IT",{day:"2-digit",month:"2-digit"}),
+        ctl: Math.round(ctl*10)/10,
+        atl: Math.round(atl*10)/10,
+        tsb: Math.round(tsb*10)/10,
+        tss,
+      });
+    }
+    // Mostra solo gli ultimi 35 giorni per leggibilità
+    return series.slice(-35);
+  })();
+
+  const currentCTL = pmcData.length ? pmcData[pmcData.length-1].ctl : 0;
+  const currentATL = pmcData.length ? pmcData[pmcData.length-1].atl : 0;
+  const currentTSB = pmcData.length ? pmcData[pmcData.length-1].tsb : 0;
+
+  const tsbStatus = (() => {
+    if (currentTSB > 15) return { label:"Fresco / Riposato", color:"#22c55e", desc:"Forma fresca, ottimo momento per gare o test importanti." };
+    if (currentTSB > -10) return { label:"Forma ottimale", color:"#0ea5e9", desc:"Buon equilibrio tra carico e recupero — zona ideale per allenarsi." };
+    if (currentTSB > -25) return { label:"Sotto carico", color:"#f59e0b", desc:"Stai accumulando fatica — normale in fase di sviluppo, monitora il recupero." };
+    return { label:"Affaticamento elevato", color:"#ef4444", desc:"Fatica alta — valuta una settimana di scarico per evitare overtraining." };
+  })();
+
+  // ── CURVA DI POTENZA (stima da uscite per durata) ────────────────────────
+  const powerCurveData = (() => {
+    const withWatts = activities.filter(a => a.average_watts > 0 && a.moving_time > 0);
+    if (!withWatts.length) return [];
+    const buckets = [
+      { label:"< 30 min", min:0, max:1800 },
+      { label:"30-60 min", min:1800, max:3600 },
+      { label:"1-2 ore", min:3600, max:7200 },
+      { label:"2-3 ore", min:7200, max:10800 },
+      { label:"> 3 ore", min:10800, max:Infinity },
+    ];
+    return buckets.map(b => {
+      const inBucket = withWatts.filter(a => a.moving_time >= b.min && a.moving_time < b.max);
+      const best = inBucket.length ? Math.max(...inBucket.map(a => a.average_watts)) : 0;
+      return { duration: b.label, watts: best, wkg: best ? w2wkg(best, weight) : "0", count: inBucket.length };
+    }).filter(b => b.count > 0);
+  })();
+
+  // Normalized Power & Variability Index (stima dall'ultima uscita con potenza)
+  const npAnalysis = (() => {
+    const withWatts = activities.filter(a => a.average_watts > 0);
+    if (!withWatts.length) return null;
+    const latest = withWatts[0];
+    // NP stimato: se weighted_average_watts disponibile (Strava lo fornisce per attività con power meter), altrimenti stima +5%
+    const np = latest.weighted_average_watts || Math.round(latest.average_watts * 1.05);
+    const vi = (np / latest.average_watts).toFixed(2);
+    return {
+      name: latest.name,
+      date: fmtDate(latest.start_date),
+      avgPower: latest.average_watts,
+      np,
+      vi,
+      viLabel: vi < 1.05 ? "Sforzo molto costante" : vi < 1.15 ? "Sforzo variabile (normale su strada)" : "Sforzo molto irregolare (gravel/salite)",
+    };
+  })();
 
   // ── TRANCHE 5 COMPUTED ────────────────────────────────────────────────────
   // Settimana corrente vs precedente
@@ -1225,6 +1309,99 @@ export default function App() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+
+              {/* ── PERFORMANCE MANAGEMENT CHART (CTL/ATL/TSB) ── */}
+              {pmcData.length > 0 && (
+                <div className="card" style={{ padding:18, marginBottom:16 }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:4, flexWrap:"wrap", gap:8 }}>
+                    <div style={{ fontSize:11, color:"#4b5563", textTransform:"uppercase", letterSpacing:".07em" }}>📈 Performance Management Chart</div>
+                    <div style={{ display:"flex", gap:14 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#0ea5e9" }}><div style={{width:8,height:8,borderRadius:"50%",background:"#0ea5e9"}}/> CTL (Fitness)</div>
+                      <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#ef4444" }}><div style={{width:8,height:8,borderRadius:"50%",background:"#ef4444"}}/> ATL (Fatica)</div>
+                      <div style={{ display:"flex", alignItems:"center", gap:5, fontSize:10, color:"#22c55e" }}><div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e"}}/> TSB (Forma)</div>
+                    </div>
+                  </div>
+                  <ResponsiveContainer width="100%" height={180}>
+                    <LineChart data={pmcData} margin={{top:10,right:0,left:-20,bottom:0}}>
+                      <XAxis dataKey="date" tick={{fontSize:9}} interval={Math.max(0,Math.floor(pmcData.length/7))} />
+                      <YAxis tick={{fontSize:9}} />
+                      <Tooltip content={<ChartTooltip />} />
+                      <ReferenceLine y={0} stroke="#374151" strokeDasharray="2 2" />
+                      <Line dataKey="ctl" name="CTL" stroke="#0ea5e9" strokeWidth={2.5} dot={false} />
+                      <Line dataKey="atl" name="ATL" stroke="#ef4444" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
+                      <Line dataKey="tsb" name="TSB" stroke="#22c55e" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr) 2fr", gap:8, marginTop:12 }}>
+                    <div style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                      <div style={{ fontSize:9, color:"#4b5563", textTransform:"uppercase", marginBottom:3 }}>CTL — Fitness</div>
+                      <div className="cond" style={{ fontSize:24, color:"#0ea5e9" }}>{currentCTL}</div>
+                    </div>
+                    <div style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                      <div style={{ fontSize:9, color:"#4b5563", textTransform:"uppercase", marginBottom:3 }}>ATL — Fatica</div>
+                      <div className="cond" style={{ fontSize:24, color:"#ef4444" }}>{currentATL}</div>
+                    </div>
+                    <div style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                      <div style={{ fontSize:9, color:"#4b5563", textTransform:"uppercase", marginBottom:3 }}>TSB — Forma</div>
+                      <div className="cond" style={{ fontSize:24, color:tsbStatus.color }}>{currentTSB > 0 ? "+" : ""}{currentTSB}</div>
+                    </div>
+                    <div style={{ background:`${tsbStatus.color}10`, border:`1px solid ${tsbStatus.color}30`, borderRadius:9, padding:"10px 12px" }}>
+                      <div style={{ fontSize:11, fontWeight:700, color:tsbStatus.color, marginBottom:2 }}>{tsbStatus.label}</div>
+                      <div style={{ fontSize:10, color:"#94a3b8", lineHeight:1.4 }}>{tsbStatus.desc}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── CURVA DI POTENZA & NORMALIZED POWER ── */}
+              {(powerCurveData.length > 0 || npAnalysis) && (
+                <div style={{ display:"grid", gridTemplateColumns: powerCurveData.length > 0 && npAnalysis ? "1.3fr 1fr" : "1fr", gap:12, marginBottom:16 }}>
+                  {powerCurveData.length > 0 && (
+                    <div className="card" style={{ padding:18 }}>
+                      <div style={{ fontSize:11, color:"#4b5563", textTransform:"uppercase", letterSpacing:".07em", marginBottom:12 }}>⚡ Curva di Potenza — Best Effort per durata</div>
+                      <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                        {powerCurveData.map(b => {
+                          const maxW = Math.max(...powerCurveData.map(x=>x.watts));
+                          const pct = maxW ? (b.watts/maxW)*100 : 0;
+                          return (
+                            <div key={b.duration}>
+                              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+                                <span style={{ fontSize:11, color:"#94a3b8" }}>{b.duration}</span>
+                                <span className="mono" style={{ fontSize:11, color:"#f59e0b", fontWeight:600 }}>{b.watts}W <span style={{color:"#4b5563"}}>({b.wkg} W/kg)</span></span>
+                              </div>
+                              <div className="bar"><div className="bar-fill" style={{ width:`${pct}%`, background:"#f59e0b", opacity:.8 }} /></div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ fontSize:10, color:"#374151", marginTop:10 }}>* Stima basata sulla potenza media migliore registrata per fascia di durata (non curva continua da dati raw)</div>
+                    </div>
+                  )}
+                  {npAnalysis && (
+                    <div className="card" style={{ padding:18 }}>
+                      <div style={{ fontSize:11, color:"#4b5563", textTransform:"uppercase", letterSpacing:".07em", marginBottom:12 }}>🎯 Normalized Power — ultima uscita</div>
+                      <div style={{ fontSize:11, color:"#94a3b8", marginBottom:10, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{npAnalysis.name} · {npAnalysis.date}</div>
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+                        <div style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                          <div style={{ fontSize:9, color:"#4b5563", textTransform:"uppercase", marginBottom:3 }}>Potenza Media</div>
+                          <div className="cond" style={{ fontSize:26, color:"#e2e8f0" }}>{npAnalysis.avgPower}<span style={{fontSize:12}}>W</span></div>
+                        </div>
+                        <div style={{ background:"#0a1120", borderRadius:9, padding:"10px 12px", textAlign:"center" }}>
+                          <div style={{ fontSize:9, color:"#4b5563", textTransform:"uppercase", marginBottom:3 }}>Normalized Power</div>
+                          <div className="cond" style={{ fontSize:26, color:"#FC4C02" }}>{npAnalysis.np}<span style={{fontSize:12}}>W</span></div>
+                        </div>
+                      </div>
+                      <div style={{ background:"rgba(168,85,247,.08)", border:"1px solid rgba(168,85,247,.2)", borderRadius:9, padding:"10px 12px" }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                          <span style={{ fontSize:11, color:"#a855f7", fontWeight:700 }}>Variability Index</span>
+                          <span className="cond" style={{ fontSize:18, color:"#a855f7" }}>{npAnalysis.vi}</span>
+                        </div>
+                        <div style={{ fontSize:10, color:"#94a3b8" }}>{npAnalysis.viLabel}</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Power Zones (if plan available) */}
               {plan?.powerZones && (
