@@ -348,7 +348,8 @@ export default function App() {
       if (savedToken && savedAthlete && savedActivities && alreadyOnboarded) {
         setToken(savedToken);
         setAthlete(JSON.parse(savedAthlete));
-        setActivities(JSON.parse(savedActivities));
+        const loadedActivities = JSON.parse(savedActivities);
+        setActivities(loadedActivities);
         // Carica anche preferenze profilo
         const w = localStorage.getItem("gc_weight"); if (w) setWeight(parseInt(w));
         const bt = localStorage.getItem("gc_bikeType"); if (bt) setBikeType(bt);
@@ -361,6 +362,17 @@ export default function App() {
         const mr = localStorage.getItem("gc_manualRides"); if (mr) setManualRides(JSON.parse(mr));
         const lr = localStorage.getItem("gc_lastRefresh");
         if (lr) setLastRefresh(lr);
+        // Carica il piano salvato, se presente
+        const savedPlan = localStorage.getItem("gc_plan");
+        if (savedPlan) {
+          const p = JSON.parse(savedPlan);
+          setPlan(p);
+          // Ricalcola le nuove attività rispetto al piano salvato
+          if (p._lastActivityDate) {
+            const newOnes = loadedActivities.filter(a => new Date(a.start_date).getTime() > new Date(p._lastActivityDate).getTime());
+            setNewActivitiesSinceLastPlan(newOnes);
+          }
+        }
         setScreen("main");
         return;
       }
@@ -424,6 +436,12 @@ export default function App() {
   useEffect(() => { localStorage.setItem("gc_goalDate", goalDate); }, [goalDate]);
   useEffect(() => { localStorage.setItem("gc_notes", JSON.stringify(notes)); }, [notes]);
   useEffect(() => { if (manualRides.length) localStorage.setItem("gc_manualRides", JSON.stringify(manualRides)); }, [manualRides]);
+  // Salva il piano AI ogni volta che viene generato/aggiornato (non se è in errore)
+  useEffect(() => {
+    if (plan && !plan._error) {
+      try { localStorage.setItem("gc_plan", JSON.stringify(plan)); } catch(e) { console.warn("localStorage plan:", e); }
+    }
+  }, [plan]);
 
   const connectMock = () => {
     setScreen("loading");
@@ -1258,7 +1276,8 @@ export default function App() {
                 if (window.confirm("Vuoi disconnetterti e tornare alla schermata iniziale?")) {
                   ["gc_onboarded","gc_token","gc_athlete","gc_activities",
                    "gc_weight","gc_bikeType","gc_daysPerWeek","gc_ftpManual",
-                   "gc_goalText","gc_goalDate","gc_goalType","gc_lastRefresh"].forEach(k => localStorage.removeItem(k));
+                   "gc_goalText","gc_goalDate","gc_goalType","gc_lastRefresh",
+                   "gc_plan","gc_manualRides","gc_notes"].forEach(k => localStorage.removeItem(k));
                   setToken(null);
                   setAthlete(null);
                   setActivities([]);
