@@ -333,6 +333,8 @@ export default function App() {
   const [lastRefresh, setLastRefresh] = useState(null);
   const [newActivitiesSinceLastPlan, setNewActivitiesSinceLastPlan] = useState([]);
   const [updatingPlan, setUpdatingPlan] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsFtpManual, setSettingsFtpManual] = useState("");
   const fileRef = useRef();
   const chatEndRef = useRef();
 
@@ -1175,7 +1177,83 @@ export default function App() {
                   <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                 </svg>
               </button>
-              {/* Tasto disconnetti */}
+              {/* Tasto impostazioni */}
+              <button onClick={() => { setSettingsFtpManual(ftpManual); setShowSettings(true); }} style={{ background:"transparent", border:"1px solid rgba(255,255,255,.1)", borderRadius:6, width:28, height:28, display:"flex", alignItems:"center", justifyContent:"center", color:"#6b7280", cursor:"pointer", fontSize:13 }} title="Impostazioni">⚙️</button>
+            </div>
+          </div>
+        </header>
+
+        {/* ── SETTINGS MODAL ── */}
+        {showSettings && (
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }} onClick={e => { if(e.target === e.currentTarget) setShowSettings(false); }}>
+            <div className="card" style={{ width:"100%", maxWidth:440, padding:24, border:"1px solid rgba(255,255,255,.1)", maxHeight:"90vh", overflowY:"auto" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+                <span className="cond" style={{ fontSize:24, color:"#fff" }}>⚙️ Impostazioni</span>
+                <button onClick={()=>setShowSettings(false)} style={{ background:"none", border:"none", color:"#6b7280", fontSize:18, cursor:"pointer" }}>✕</button>
+              </div>
+
+              {/* Peso */}
+              <div style={{ marginBottom:18 }}>
+                <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:8, textTransform:"uppercase", letterSpacing:".06em" }}>Peso corporeo</label>
+                <div style={{ display:"flex", alignItems:"center", gap:14, background:"rgba(255,255,255,.03)", border:"1px solid rgba(255,255,255,.08)", borderRadius:12, padding:"10px 16px" }}>
+                  <button onClick={() => setWeight(w => Math.max(40, w-1))} style={{ width:32, height:32, borderRadius:"50%", background:"rgba(255,255,255,.08)", border:"none", color:"#fff", fontSize:16, cursor:"pointer" }}>−</button>
+                  <div style={{ flex:1, textAlign:"center" }}>
+                    <span className="cond" style={{ fontSize:32, color:"#FC4C02" }}>{weight}</span>
+                    <span style={{ fontSize:12, color:"#64748b", marginLeft:4 }}>kg</span>
+                  </div>
+                  <button onClick={() => setWeight(w => Math.min(130, w+1))} style={{ width:32, height:32, borderRadius:"50%", background:"rgba(255,255,255,.08)", border:"none", color:"#fff", fontSize:16, cursor:"pointer" }}>+</button>
+                </div>
+              </div>
+
+              {/* Tipo bici */}
+              <div style={{ marginBottom:18 }}>
+                <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:8, textTransform:"uppercase", letterSpacing:".06em" }}>Tipo di bici</label>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                  {[["gravel","🪨 Gravel"],["road","🛣️ Road"],["both","🔄 Entrambe"]].map(([val, label]) => (
+                    <div key={val} onClick={() => setBikeType(val)} style={{ padding:"12px 8px", textAlign:"center", border:`2px solid ${bikeType===val?"#FC4C02":"rgba(255,255,255,.08)"}`, borderRadius:10, background:bikeType===val?"rgba(252,76,2,.1)":"rgba(255,255,255,.02)", cursor:"pointer", fontSize:12, fontWeight:600, color:bikeType===val?"#FC4C02":"#94a3b8", transition:"all .2s" }}>
+                      {label}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Giorni a settimana */}
+              <div style={{ marginBottom:18 }}>
+                <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:8, textTransform:"uppercase", letterSpacing:".06em" }}>Giorni di allenamento a settimana</label>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)", gap:6 }}>
+                  {[2,3,4,5,6,7].map(d => (
+                    <div key={d} onClick={() => setDaysPerWeek(d)} style={{ padding:"10px 0", textAlign:"center", border:`2px solid ${daysPerWeek===d?"#FC4C02":"rgba(255,255,255,.08)"}`, borderRadius:10, background:daysPerWeek===d?"rgba(252,76,2,.1)":"rgba(255,255,255,.02)", cursor:"pointer" }}>
+                      <span className="cond" style={{ fontSize:20, color:daysPerWeek===d?"#FC4C02":"#fff" }}>{d}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* FTP */}
+              <div style={{ marginBottom:22 }}>
+                <label style={{ fontSize:11, color:"#6b7280", display:"block", marginBottom:8, textTransform:"uppercase", letterSpacing:".06em" }}>FTP (Watt)</label>
+                <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                  <input type="number" value={settingsFtpManual} onChange={e=>setSettingsFtpManual(e.target.value)} placeholder={`Auto: ${calcFTP(activities, weight)}W`} min="80" max="500" style={{ flex:1, textAlign:"center", fontSize:18, fontWeight:700, color:"#FC4C02" }} />
+                  {settingsFtpManual && (
+                    <button onClick={()=>setSettingsFtpManual("")} style={{ background:"rgba(255,255,255,.06)", border:"1px solid rgba(255,255,255,.1)", borderRadius:8, padding:"10px 12px", color:"#6b7280", fontSize:11, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>Reset auto</button>
+                  )}
+                </div>
+                <p style={{ fontSize:11, color:"#374151", marginTop:6 }}>
+                  {settingsFtpManual ? `W/kg: ${w2wkg(parseInt(settingsFtpManual)||0, weight)}` : `Calcolato automaticamente dalle uscite: ${calcFTP(activities, weight)}W (${w2wkg(calcFTP(activities, weight), weight)} W/kg)`}
+                </p>
+              </div>
+
+              {/* Salva */}
+              <button onClick={() => {
+                setFtpManual(settingsFtpManual);
+                setShowSettings(false);
+              }} className="primary-btn" style={{ width:"100%", justifyContent:"center", marginBottom:10 }}>
+                <IC n="check" s={15} /> Salva modifiche
+              </button>
+
+              <hr style={{ border:"none", borderTop:"1px solid rgba(255,255,255,.06)", margin:"14px 0" }} />
+
+              {/* Disconnetti */}
               <button onClick={() => {
                 if (window.confirm("Vuoi disconnetterti e tornare alla schermata iniziale?")) {
                   ["gc_onboarded","gc_token","gc_athlete","gc_activities",
@@ -1185,12 +1263,15 @@ export default function App() {
                   setAthlete(null);
                   setActivities([]);
                   setPlan(null);
+                  setShowSettings(false);
                   setScreen("landing");
                 }
-              }} style={{ background:"transparent", border:"none", color:"#374151", fontSize:13, cursor:"pointer", padding:"2px 4px", borderRadius:4 }} title="Disconnetti">⚙️</button>
+              }} style={{ width:"100%", background:"rgba(239,68,68,.08)", border:"1px solid rgba(239,68,68,.2)", borderRadius:10, padding:"10px 0", color:"#ef4444", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"'Inter',sans-serif" }}>
+                Disconnetti
+              </button>
             </div>
           </div>
-        </header>
+        )}
 
         {/* ANALYZING OVERLAY */}
         {analyzing && (
